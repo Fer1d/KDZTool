@@ -57,6 +57,7 @@ public:
 
     explicit DzHeader(std::ifstream& file, const KdzHeader::Record& dz_record, bool skip_verification);
     void print_info() const;
+    uint64_t sector_size() const;
 
 private:
     void parse_part_headers(std::ifstream& file, bool verify_data_hash);

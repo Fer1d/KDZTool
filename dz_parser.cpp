@@ -323,6 +323,26 @@ void DzHeader::parse_part_headers(std::ifstream& file, bool verify_data_hash) {
     }
 }
 
+uint64_t DzHeader::sector_size() const {
+    size_t matches_512 = 0;
+    size_t matches_4096 = 0;
+
+    for (const auto& hw_pair : parts) {
+        for (const auto& name_pair : hw_pair.second) {
+            for (const auto& chunk : name_pair.second) {
+                if (chunk.sector_count == 0) continue;
+                const uint64_t data_size = chunk.data_size;
+                const uint64_t sector_count = chunk.sector_count;
+                if (data_size == sector_count * 512) ++matches_512;
+                if (data_size == sector_count * 4096) ++matches_4096;
+            }
+        }
+    }
+
+    // Preserve the original behavior if the metadata is inconclusive.
+    return matches_512 > matches_4096 ? 512 : 4096;
+}
+
 void DzHeader::print_info() const {
     size_t total_chunks = 0;
     for (const auto& hw_pair : parts) {
@@ -365,6 +385,7 @@ void DzHeader::print_info() const {
     std::cout << "product_fuse_id = " << (int)this->product_fuse_id << std::endl;
     std::cout << "is_factory_image = " << (this->is_factory_image ? "true" : "false") << std::endl;
     std::cout << "is_ufs = " << (this->is_ufs ? "true" : "false") << std::endl;
+    std::cout << "sector_size = " << this->sector_size() << std::endl;
     std::cout << "chunk_hdrs_hash = " << bytes_to_hex(this->chunk_hdrs_hash) << std::endl;
     std::cout << "data_hash = " << bytes_to_hex(this->data_hash) << std::endl;
     std::cout << "header_crc = " << std::hex << this->header_crc << std::dec << std::endl;

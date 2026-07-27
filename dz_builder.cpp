@@ -119,6 +119,21 @@ std::vector<char> DzBuilder::build(const std::filesystem::path &input_dir, Threa
         }
     }
 
+    uint64_t sector_size = meta.value("sector_size", uint64_t{0});
+    if (sector_size != 512 && sector_size != 4096) {
+        size_t matches_512 = 0;
+        size_t matches_4096 = 0;
+        for (const auto& task : tasks_to_process) {
+            const uint64_t data_size = task.chunk_meta["data_size"];
+            const uint64_t sector_count = task.chunk_meta["sector_count"];
+            if (sector_count == 0) continue;
+            if (data_size == sector_count * 512) ++matches_512;
+            if (data_size == sector_count * 4096) ++matches_4096;
+        }
+        sector_size = matches_512 > matches_4096 ? 512 : 4096;
+    }
+    std::cout << "  Using " << sector_size << "-byte DZ sectors." << std::endl;
+
     std::vector<std::future<ChunkResult>> future_results;
     future_results.reserve(total_chunk_count);
 
@@ -127,7 +142,7 @@ std::vector<char> DzBuilder::build(const std::filesystem::path &input_dir, Threa
     for (const auto &task_info : tasks_to_process)
     {
         future_results.emplace_back(
-            pool.enqueue([this, task_info, is_v0]
+            pool.enqueue([this, task_info, is_v0, sector_size]
             {
                 // This lambda is the task executed by a worker thread.
 
@@ -147,7 +162,7 @@ std::vector<char> DzBuilder::build(const std::filesystem::path &input_dir, Threa
                     throw std::runtime_error("Failed to open image file in thread: " + task_info.img_filename.string());
                 }
 
-                uint64_t offset = (task_info.chunk_meta["start_sector"].get<uint64_t>() - task_info.chunk_meta["part_start_sector"].get<uint64_t>()) * 4096;
+                uint64_t offset = (task_info.chunk_meta["start_sector"].get<uint64_t>() - task_info.chunk_meta["part_start_sector"].get<uint64_t>()) * sector_size;
                 uint32_t size = task_info.chunk_meta["data_size"];
                 
                 f_img.seekg(offset);

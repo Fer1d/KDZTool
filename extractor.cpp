@@ -143,6 +143,9 @@ void decompress_and_write_chunk(
 
 // Writing task will be directly dispatched to the ThreadPool.
 void extract_dz_parts(const std::string& in_path, const DzHeader& dz_hdr, const std::string& out_path, ThreadPool& pool) {
+    const uint64_t sector_size = dz_hdr.sector_size();
+    std::cout << "Using " << sector_size << "-byte DZ sectors." << std::endl << std::endl;
+
     for (const auto& hw_part_pair : dz_hdr.parts) {
         uint32_t hw_part = hw_part_pair.first;
         const auto& parts = hw_part_pair.second;
@@ -169,7 +172,7 @@ void extract_dz_parts(const std::string& in_path, const DzHeader& dz_hdr, const 
             // Push all block decompression tasks for the entire partition to ThreadPool.
             for (const auto& chunk : chunks) {
                 // Accurately calculate the absolute byte offset of the block in the target .img file.
-                uint64_t out_offset = ((uint64_t)chunk.start_sector - base_sector) * 4096;
+                uint64_t out_offset = ((uint64_t)chunk.start_sector - base_sector) * sector_size;
                 results.emplace_back(
                     pool.enqueue(decompress_and_write_chunk, in_path, dz_hdr.compression, 
                                  chunk.file_offset, chunk.file_size, out_offset, out_mutex, out_f)
@@ -179,7 +182,7 @@ void extract_dz_parts(const std::string& in_path, const DzHeader& dz_hdr, const 
             // Simultaneously wait for all tasks to be written and output progress logs.
             for (size_t i = 0; i < chunks.size(); ++i) {
                 const auto& chunk = chunks[i];
-                std::cout << "    extracting chunk " << chunk.name << " (" << std::max(chunk.data_size, chunk.sector_count * 4096u) << " bytes)..." << std::endl;
+                std::cout << "    extracting chunk " << chunk.name << " (" << std::max<uint64_t>(chunk.data_size, (uint64_t)chunk.sector_count * sector_size) << " bytes)..." << std::endl;
                 results[i].get(); 
             }
 
@@ -189,7 +192,7 @@ void extract_dz_parts(const std::string& in_path, const DzHeader& dz_hdr, const 
             uint64_t final_size = 0;
             if (!chunks.empty()) {
                 const auto& last_chunk = chunks.back();
-                final_size = ((uint64_t)last_chunk.start_sector + last_chunk.sector_count - base_sector) * 4096;
+                final_size = ((uint64_t)last_chunk.start_sector + last_chunk.sector_count - base_sector) * sector_size;
                 fs::resize_file(out_file_path, final_size);
             }
 

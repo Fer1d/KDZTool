@@ -152,7 +152,7 @@ int main(int argc, char* argv[]) {
                         int i = 0;
                         for (const auto& chunk : name_pair.second) {
                             std::cout << "    " << i++ << ". " << chunk.name 
-                                      << " (" << std::max(chunk.data_size, chunk.sector_count * 4096u) << " bytes, sparse: " 
+                                      << " (" << std::max<uint64_t>(chunk.data_size, (uint64_t)chunk.sector_count * dz_hdr.sector_size()) << " bytes, sparse: "
                                       << (chunk.is_sparse ? "true" : "false") << ")" << std::endl;
                         }
                         std::cout << std::endl;

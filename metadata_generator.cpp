@@ -96,6 +96,7 @@ void generate_metadata(
     dz_json["product_fuse_id"] = dz_hdr.product_fuse_id;
     dz_json["is_factory_image"] = dz_hdr.is_factory_image;
     dz_json["operator_code"] = dz_hdr.operator_code;
+    dz_json["sector_size"] = dz_hdr.sector_size();
     
     json dz_parts_json;
     // The data structure will be changed to vector<pair<...>> to preserve order
