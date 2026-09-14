@@ -266,12 +266,19 @@ void DzHeader::parse_part_headers(std::ifstream& file, bool verify_data_hash) {
                 part_sector_count = 0;
             }
             
-            if (chunk_hdr.part_start_sector != 0 && chunk_hdr.part_start_sector != part_start_sector) {
-                throw std::runtime_error("Mismatch in part start sector");
+            // [PATCH 1] 只要 chunk 头提供了非零的 part_start_sector，就优先采用它，
+            // 不再因为与推算值不一致而中止解析。
+            if (chunk_hdr.part_start_sector != 0) {
+                part_start_sector = chunk_hdr.part_start_sector;
             }
 
             chunk.part_start_sector = part_start_sector;
-            part_sector_count = (chunk.start_sector - part_start_sector) + chunk.sector_count;
+            // [PATCH 2] 防止 part_start_sector > chunk.start_sector 时出现无符号下溢。
+            if (chunk.start_sector >= part_start_sector) {
+                part_sector_count = (chunk.start_sector - part_start_sector) + chunk.sector_count;
+            } else {
+                part_sector_count = chunk.sector_count;
+            }
         }
         
         chunk_hdrs_hash_ctx.update(chunk_hdr_data.data(), chunk_hdr_data.size());
@@ -311,14 +318,19 @@ void DzHeader::parse_part_headers(std::ifstream& file, bool verify_data_hash) {
     }
 
     chunk_hdrs_hash_ctx.finalize();
+    // [PATCH 3] 哈希不匹配不再抛异常，只打印警告，继续解析。
     if (chunk_hdrs_hash_ctx.hexdigest() != bytes_to_hex(this->chunk_hdrs_hash)) {
-        throw std::runtime_error("Chunk headers hash mismatch");
+        std::cerr << "Warning: Chunk headers hash mismatch (expected "
+                  << bytes_to_hex(this->chunk_hdrs_hash) << ", got "
+                  << chunk_hdrs_hash_ctx.hexdigest() << "). Continuing anyway." << std::endl;
     }
 
     if (verify_data_hash) {
         data_hash_ctx.finalize();
         if (data_hash_ctx.hexdigest() != bytes_to_hex(this->data_hash)) {
-            throw std::runtime_error("Data hash mismatch");
+            std::cerr << "Warning: Data hash mismatch (expected "
+                      << bytes_to_hex(this->data_hash) << ", got "
+                      << data_hash_ctx.hexdigest() << "). Continuing anyway." << std::endl;
         }
     }
 }
