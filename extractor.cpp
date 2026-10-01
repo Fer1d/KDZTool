@@ -1,4 +1,5 @@
 #include "extractor.hpp"
+#include "partition_layout.hpp"
 #include <iostream>
 #include <filesystem> // For creating directories, requires C++17
 #include <vector>
@@ -142,7 +143,8 @@ void decompress_and_write_chunk(
 }
 
 // Writing task will be directly dispatched to the ThreadPool.
-void extract_dz_parts(const std::string& in_path, const DzHeader& dz_hdr, const std::string& out_path, ThreadPool& pool) {
+void extract_dz_parts(const std::string& in_path, const DzHeader& dz_hdr, const std::string& out_path,
+                      ThreadPool& pool, bool flash_layout) {
     const uint64_t sector_size = dz_hdr.sector_size();
     std::cout << "Using " << sector_size << "-byte DZ sectors." << std::endl << std::endl;
 
@@ -154,10 +156,41 @@ void extract_dz_parts(const std::string& in_path, const DzHeader& dz_hdr, const 
         for (const auto& pname_pair : parts) {
             const std::string& pname = pname_pair.first;
             const auto& chunks = pname_pair.second;
-            
-            fs::path out_file_path = fs::path(out_path) / (std::to_string(hw_part) + "." + pname + ".img");
+            if (chunks.empty()) continue;
+
+            const PartitionLayout layout =
+                compute_partition_layout(chunks, static_cast<uint32_t>(sector_size), hw_part, pname);
+
+            // A sparse partition of a 9008 package becomes one small file per chunk:
+            // writing it as a single image would create a file that is empty almost
+            // everywhere (userdata is the usual example).
+            if (flash_layout && !layout.dense) {
+                std::cout << "  extracting part " << pname << " as " << layout.runs.size()
+                          << " chunk file(s)..." << std::endl;
+                for (const auto& run : layout.runs) {
+                    const DzHeader::Chunk& chunk = chunks[run.chunk_index];
+                    fs::path out_file_path = fs::path(out_path) / run.file_name;
+
+                    auto out_f = std::make_shared<std::ofstream>(out_file_path, std::ios::binary | std::ios::trunc);
+                    if (!(*out_f)) {
+                        throw std::runtime_error("Failed to open output file: " + out_file_path.string());
+                    }
+                    auto out_mutex = std::make_shared<std::mutex>();
+
+                    auto result = pool.enqueue(decompress_and_write_chunk, in_path, dz_hdr.compression,
+                                               chunk.file_offset, chunk.file_size, (uint64_t)0, out_mutex, out_f);
+                    result.get();
+                    out_f->close();
+
+                    std::cout << "    " << run.file_name << " (" << run.sectors * sector_size
+                              << " bytes)..." << std::endl;
+                }
+                continue;
+            }
+
+            fs::path out_file_path = fs::path(out_path) / partition_image_name(hw_part, pname);
             std::cout << "  extracting part " << pname << "..." << std::endl;
-            
+
             auto out_f = std::make_shared<std::ofstream>(out_file_path, std::ios::binary | std::ios::trunc);
             if (!(*out_f)) {
                 throw std::runtime_error("Failed to open output file: " + out_file_path.string());
@@ -166,51 +199,38 @@ void extract_dz_parts(const std::string& in_path, const DzHeader& dz_hdr, const 
 
             std::vector<std::future<void>> results;
             results.reserve(chunks.size());
-            
-            uint64_t base_sector = chunks.empty() ? 0 : chunks[0].part_start_sector;
 
-            // Push all block decompression tasks for the entire partition to ThreadPool.
+            const uint64_t base_sector = layout.base_sector;
+
             for (const auto& chunk : chunks) {
-                // Accurately calculate the absolute byte offset of the block in the target .img file.
-                uint64_t out_offset = ((uint64_t)chunk.start_sector - base_sector) * sector_size;
+                // A chunk that would sit before the image base is written at the
+                // start instead of seeking to a huge, wrapped offset.
+                const uint64_t delta = (static_cast<uint64_t>(chunk.start_sector) >= base_sector)
+                                           ? (static_cast<uint64_t>(chunk.start_sector) - base_sector)
+                                           : 0;
+                const uint64_t out_offset = delta * sector_size;
                 results.emplace_back(
-                    pool.enqueue(decompress_and_write_chunk, in_path, dz_hdr.compression, 
+                    pool.enqueue(decompress_and_write_chunk, in_path, dz_hdr.compression,
                                  chunk.file_offset, chunk.file_size, out_offset, out_mutex, out_f)
                 );
             }
 
-            // Simultaneously wait for all tasks to be written and output progress logs.
             for (size_t i = 0; i < chunks.size(); ++i) {
                 const auto& chunk = chunks[i];
-                std::cout << "    extracting chunk " << chunk.name << " (" << std::max<uint64_t>(chunk.data_size, (uint64_t)chunk.sector_count * sector_size) << " bytes)..." << std::endl;
-                results[i].get(); 
+                std::cout << "    extracting chunk " << chunk.name << " ("
+                          << std::max<uint64_t>(chunk.data_size, (uint64_t)chunk.sector_count * sector_size)
+                          << " bytes)..." << std::endl;
+                results[i].get();
             }
 
             out_f->close();
 
-            // Sparse padding. sector_count is a wipe extent, not the payload size,
-            // so the image must reach at least as far as the decompressed data of
-            // every chunk does - otherwise resize_file() would cut off data that was
-            // written at a higher offset.
-            uint64_t final_size = 0;
-            if (!chunks.empty()) {
-                const uint64_t declared_end =
-                    static_cast<uint64_t>(chunks.back().start_sector) + chunks.back().sector_count;
-                final_size = (declared_end > base_sector) ? (declared_end - base_sector) * sector_size : 0;
-
-                for (const auto& chunk : chunks) {
-                    const uint64_t data_sectors =
-                        (static_cast<uint64_t>(chunk.data_size) + sector_size - 1) / sector_size;
-                    const uint64_t data_end = static_cast<uint64_t>(chunk.start_sector) + data_sectors;
-                    if (data_end <= base_sector) continue;
-
-                    const uint64_t bytes = (data_end - base_sector) * sector_size;
-                    if (bytes > final_size) final_size = bytes;
-                }
-
+            // The image reaches as far as its data does; sector_count is a wipe
+            // extent, not a payload length.
+            const uint64_t final_size = layout.total_sectors * sector_size;
+            if (final_size > 0) {
                 fs::resize_file(out_file_path, final_size);
             }
-
             std::cout << "  done. extracted size = " << final_size << " bytes" << std::endl << std::endl;
         }
     }

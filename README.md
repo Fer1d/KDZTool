@@ -221,8 +221,15 @@ By default the parser only stops on structural damage - a truncated file, a wron
 
 With `--rawprogram` the extract command also writes Qualcomm compatible metadata next to the partition images:
 
-  - `rawprogram<N>.xml`: one `<program>` element per partition of physical partition `N`, pointing at `<N>.<partition>.img` with its start sector, sector count, size and `SECTOR_SIZE_IN_BYTES`. An image that ends exactly at the end of the disk (the backup GPT) is placed with the `NUM_DISK_SECTORS` placeholder so that it follows the device when it offers more capacity; every other entry keeps fixed sectors.
+  - `rawprogram<N>.xml`: one `<program>` element per run of data of physical partition `N` (LUN), with its start sector, sector count, size and `SECTOR_SIZE_IN_BYTES`.
+  - A dense partition becomes one `<partition>.img`; a sparse one (userdata is the typical case - its data covers a few MiB of a 10 GiB partition) becomes one small file per chunk, named after the chunk. That is the layout LG's own packages use, and it keeps a 9008 package at the size of the data instead of the size of the partitions.
+  - File names carry no index: LUN 0 is written without a prefix (`system_a.img`, `userdata_1.img_3702662`), the other LUNs get the letter the reference tools use (`B.` for LUN 1, `C.` for LUN 2, ...).
+  - Entries whose files would be byte-identical share one file, which is what LG does for the A and B slot (`boot_a` and `boot_b` point at the same `boot_a.img`).
+  - An entry that ends exactly at the end of the disk (the backup GPT) is placed with the `NUM_DISK_SECTORS` placeholder so that it follows the device when it offers more capacity; every other entry keeps fixed sectors.
   - `patch<N>.xml`: entries that resize the partition which grows to fill the disk. Values that depend on the target capacity use the `NUM_DISK_SECTORS` placeholder, which QFIL substitutes while flashing. When no partition grows, the file only contains an empty `<patches>` element.
+
+Because a sparse partition is stored as chunk files, the whole-partition images are only written by a plain
+`extract` (without `--rawprogram`) - which is also the layout `repack` needs.
 
 The sector size is read from the GPT embedded in the firmware. LG devices only use 512-byte (eMMC) and 4096-byte (UFS) logical blocks, so those are the two sizes the probe tries, starting with the one implied by the `is_ufs` flag of the DZ header; a GPT that contradicts that flag, or a chunk size heuristic that disagrees with the GPT, is recorded as a warning. When no GPT is found the heuristic is used instead, and `--sector-size` overrides everything - it is also the way to force any other sector size. A complete QFIL flash still needs the matching firehose programmer (`prog_*.mbn`), which is not part of a KDZ file.
 

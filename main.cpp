@@ -176,7 +176,7 @@ int main(int argc, char* argv[]) {
                 
                 // Use thread pool to unpack DZ partitions
                 std::cout << "Initializing thread pool with " << num_threads << " threads for extraction." << std::endl << std::endl;
-                extract_dz_parts(file_path, dz_hdr, *extract_path, pool);
+                extract_dz_parts(file_path, dz_hdr, *extract_path, pool, rawprogram);
 
                 // Unpacking V3's additional information
                 extract_additional_data(in_file, kdz_header, *extract_path);

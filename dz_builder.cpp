@@ -1,4 +1,5 @@
 #include "dz_builder.hpp"
+#include "partition_layout.hpp"
 #include <md5.hpp>
 #include <thread_pool.hpp>
 #include <zlib.h>
@@ -99,7 +100,9 @@ std::vector<char> DzBuilder::build(const std::filesystem::path &input_dir, Threa
         int hw_part = std::stoi(hw_part_str);
         for (auto const &[pname, chunks] : parts.items())
         {
-            auto img_filename = input_dir / (std::to_string(hw_part) + "." + pname + ".img");
+            // Same naming the extractor uses: no prefix for LUN 0, a letter prefix
+            // for the other LUNs, and one image per dense partition.
+            auto img_filename = input_dir / partition_image_name(hw_part, pname);
             if (!std::filesystem::exists(img_filename))
             {
                 throw std::runtime_error("ERROR: Image file not found: " + img_filename.string());
