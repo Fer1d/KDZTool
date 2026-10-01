@@ -111,6 +111,8 @@ With `--rawprogram` the extract command also writes Qualcomm compatible metadata
 
 The sector size is read from the GPT embedded in the firmware. LG devices only use 512-byte (eMMC) and 4096-byte (UFS) logical blocks, so those are the two sizes the probe tries, starting with the one implied by the `is_ufs` flag of the DZ header; a GPT that contradicts that flag, or a chunk size heuristic that disagrees with the GPT, is recorded as a warning. When no GPT is found the heuristic is used instead, and `--sector-size` overrides everything - it is also the way to force any other sector size. A complete QFIL flash still needs the matching firehose programmer (`prog_*.mbn`), which is not part of a KDZ file.
 
+One note on `sparse`: the `is_sparse` flag of a DZ chunk header does not mean the payload is an Android sparse image - it marks a partition that the archive stores with holes. The generator therefore inspects the image file itself and only sets `sparse="true"` when the Android sparse magic is really present; such an entry then describes the expanded partition.
+
 **Example:**
 
 ```bash

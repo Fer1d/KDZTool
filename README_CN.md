@@ -119,6 +119,8 @@ General Options:
 
 扇区大小从固件内嵌的 GPT 读取。LG 设备只用 512 字节（eMMC）和 4096 字节（UFS）两种逻辑块，因此探测只尝试这两个值，并按 DZ 头里 `is_ufs` 标志暗示的那个值优先；若 GPT 结论与该标志矛盾，或与"按数据块大小投票"的启发式结论矛盾，都会记录为警告。找不到 GPT 时退回启发式，`--sector-size` 优先级最高——它也是强制其它奇特扇区大小的唯一途径。完整的 QFIL 刷机还需要配套的 firehose 引导程序（`prog_*.mbn`），它不在 KDZ 里。
 
+关于 `sparse` 需要说明一点：DZ 数据块头里的 `is_sparse` **并不表示** payload 是 Android sparse 镜像（它表示该分区在 DZ 里是带空洞存储的）。因此生成器改为检查镜像文件本身，只有真的存在 Android sparse magic 时才写 `sparse="true"`，此时该条目描述的是展开后的分区大小。
+
 **示例：**
 
 ```bash

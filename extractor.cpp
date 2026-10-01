@@ -188,11 +188,26 @@ void extract_dz_parts(const std::string& in_path, const DzHeader& dz_hdr, const 
 
             out_f->close();
 
-            // Sparse padding
+            // Sparse padding. sector_count is a wipe extent, not the payload size,
+            // so the image must reach at least as far as the decompressed data of
+            // every chunk does - otherwise resize_file() would cut off data that was
+            // written at a higher offset.
             uint64_t final_size = 0;
             if (!chunks.empty()) {
-                const auto& last_chunk = chunks.back();
-                final_size = ((uint64_t)last_chunk.start_sector + last_chunk.sector_count - base_sector) * sector_size;
+                const uint64_t declared_end =
+                    static_cast<uint64_t>(chunks.back().start_sector) + chunks.back().sector_count;
+                final_size = (declared_end > base_sector) ? (declared_end - base_sector) * sector_size : 0;
+
+                for (const auto& chunk : chunks) {
+                    const uint64_t data_sectors =
+                        (static_cast<uint64_t>(chunk.data_size) + sector_size - 1) / sector_size;
+                    const uint64_t data_end = static_cast<uint64_t>(chunk.start_sector) + data_sectors;
+                    if (data_end <= base_sector) continue;
+
+                    const uint64_t bytes = (data_end - base_sector) * sector_size;
+                    if (bytes > final_size) final_size = bytes;
+                }
+
                 fs::resize_file(out_file_path, final_size);
             }
 

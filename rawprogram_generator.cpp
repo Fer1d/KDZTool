@@ -19,7 +19,8 @@ struct PartitionImage {
     uint32_t hw_partition = 0;
     uint64_t base_sector = 0;
     uint64_t total_sectors = 0;
-    bool sparse = false;
+    bool sparse = false;             // the image really is an Android sparse image
+    uint64_t expanded_sectors = 0;   // what that sparse image expands to
     std::string filename;
 };
 
@@ -69,7 +70,40 @@ uint64_t size_in_kb(uint64_t sectors, uint32_t sector_size) {
 
 // Collects the partition images the extractor produced, in the order in which
 // they should be written: physical partition first, then start sector.
-std::vector<PartitionImage> collect_partition_images(const DzHeader& dz_hdr, Diagnostics& diag) {
+// Our extractor writes the decompressed payload unchanged, so an image is only a
+// sparse image when the payload starts with the Android sparse magic. The
+// is_sparse flag of the chunk header means something else (the partition is
+// stored with holes), which is why it is not used here.
+void probe_sparse_image(const fs::path& path, uint32_t sector_size, PartitionImage& image) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in) return;
+
+    unsigned char header[20] = {0};
+    in.read(reinterpret_cast<char*>(header), sizeof(header));
+    if (in.gcount() < static_cast<std::streamsize>(sizeof(header))) return;
+
+    const uint32_t magic = static_cast<uint32_t>(header[0]) |
+                           (static_cast<uint32_t>(header[1]) << 8) |
+                           (static_cast<uint32_t>(header[2]) << 16) |
+                           (static_cast<uint32_t>(header[3]) << 24);
+    if (magic != 0xED26FF3Au) return;
+
+    const uint32_t block_size = static_cast<uint32_t>(header[12]) |
+                                (static_cast<uint32_t>(header[13]) << 8) |
+                                (static_cast<uint32_t>(header[14]) << 16) |
+                                (static_cast<uint32_t>(header[15]) << 24);
+    const uint32_t total_blocks = static_cast<uint32_t>(header[16]) |
+                                  (static_cast<uint32_t>(header[17]) << 8) |
+                                  (static_cast<uint32_t>(header[18]) << 16) |
+                                  (static_cast<uint32_t>(header[19]) << 24);
+    image.sparse = true;
+    // total_blocks counts blocks of block_size bytes; the entry in the XML counts
+    // sectors of the DZ's sector size.
+    image.expanded_sectors = (static_cast<uint64_t>(total_blocks) * block_size) / sector_size;
+}
+
+std::vector<PartitionImage> collect_partition_images(const DzHeader& dz_hdr, uint32_t sector_size,
+                                                     Diagnostics& diag) {
     std::vector<PartitionImage> images;
 
     for (const auto& hw_pair : dz_hdr.parts) {
@@ -83,20 +117,24 @@ std::vector<PartitionImage> collect_partition_images(const DzHeader& dz_hdr, Dia
             image.base_sector = chunks.front().part_start_sector;
             image.filename = std::to_string(image.hw_partition) + "." + image.name + ".img";
 
-            uint64_t highest_end = 0;
-            for (std::size_t i = 0; i < chunks.size(); ++i) {
-                const uint64_t chunk_end = static_cast<uint64_t>(chunks[i].start_sector) + chunks[i].sector_count;
-                if (chunk_end > highest_end) highest_end = chunk_end;
-                if (chunks[i].is_sparse) image.sparse = true;
-            }
-
-            // The extractor computes the image size from the last chunk, so the
-            // same value is used here to keep XML and disk consistent.
-            const uint64_t declared_end =
+            // The header's sector_count is a wipe extent, while the payload is
+            // data_size bytes long. The image therefore reaches as far as the last
+            // chunk's wipe extent and at least as far as the decompressed data of
+            // every chunk, exactly like the extractor sizes the file on disk.
+            uint64_t declared_end =
                 static_cast<uint64_t>(chunks.back().start_sector) + chunks.back().sector_count;
-            if (highest_end != declared_end) {
-                diag.warn("rawprogram", "the chunks of partition \"" + image.name +
-                                         "\" are out of order, so the extracted image may be truncated");
+            uint64_t data_end = 0;
+            for (std::size_t i = 0; i < chunks.size(); ++i) {
+                const uint64_t data_sectors =
+                    (static_cast<uint64_t>(chunks[i].data_size) + sector_size - 1) / sector_size;
+                const uint64_t chunk_data_end = static_cast<uint64_t>(chunks[i].start_sector) + data_sectors;
+                if (chunk_data_end > data_end) data_end = chunk_data_end;
+            }
+            if (data_end > declared_end) {
+                diag.warn("rawprogram", "partition \"" + image.name + "\" carries data up to sector " +
+                                         std::to_string(data_end) + " but its last chunk only wipes up to " +
+                                         std::to_string(declared_end) + "; using the data extent");
+                declared_end = data_end;
             }
 
             if (declared_end <= image.base_sector) continue;
@@ -131,6 +169,12 @@ void write_rawprogram(const fs::path& path, uint32_t hw_partition,
         const bool at_disk_end = disk_sectors != 0 &&
                                  image.base_sector + image.total_sectors == disk_sectors;
 
+        // A sparse image is expanded by the flasher, so its entry describes the
+        // expanded partition rather than the file that is on disk.
+        const uint64_t image_sectors = (image.sparse && image.expanded_sectors != 0)
+                                           ? image.expanded_sectors
+                                           : image.total_sectors;
+
         std::string start_sector;
         std::string start_byte_hex;
         if (at_disk_end) {
@@ -147,9 +191,9 @@ void write_rawprogram(const fs::path& path, uint32_t hw_partition,
             << " file_sector_offset=\"0\""
             << " filename=\"" << xml_escape(image.filename) << "\""
             << " label=\"" << xml_escape(image.name) << "\""
-            << " num_partition_sectors=\"" << image.total_sectors << "\""
+            << " num_partition_sectors=\"" << image_sectors << "\""
             << " physical_partition_number=\"" << hw_partition << "\""
-            << " size_in_KB=\"" << size_in_kb(image.total_sectors, sector_size) << "\""
+            << " size_in_KB=\"" << size_in_kb(image_sectors, sector_size) << "\""
             << " sparse=\"" << (image.sparse ? "true" : "false") << "\""
             << " start_byte_hex=\"" << start_byte_hex << "\""
             << " start_sector=\"" << start_sector << "\""
@@ -313,7 +357,10 @@ void generate_rawprogram_files(const std::string& out_dir, const DzHeader& dz_hd
         return;
     }
 
-    const std::vector<PartitionImage> images = collect_partition_images(dz_hdr, diag);
+    std::vector<PartitionImage> images = collect_partition_images(dz_hdr, sector_size, diag);
+    for (std::size_t i = 0; i < images.size(); ++i) {
+        probe_sparse_image(fs::path(out_dir) / images[i].filename, sector_size, images[i]);
+    }
     if (images.empty()) {
         diag.warn("rawprogram", "the DZ archive contains no partitions to describe");
         return;
