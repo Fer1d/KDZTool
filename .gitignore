@@ -5,3 +5,7 @@
 *.bin
 out/
 dzextracted/
+
+# Build output (the CI publishes the binaries instead)
+build/
+build-*/

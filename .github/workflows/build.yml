@@ -1,0 +1,162 @@
+name: build
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    name: Linux x86_64
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends cmake ninja-build g++ zlib1g-dev libzstd-dev
+
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Strip
+        run: strip build/kdz-tool
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: kdz-tool-linux-x86_64
+          path: build/kdz-tool
+          if-no-files-found: error
+
+  windows:
+    name: Windows x86_64 (MSYS2 UCRT64)
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-zlib
+            mingw-w64-ucrt-x86_64-zstd
+
+      - name: Configure
+        run: >-
+          cmake -S . -B build-win -G Ninja -DCMAKE_BUILD_TYPE=Release
+          -DZLIB_USE_STATIC_LIBS=ON -DCMAKE_EXE_LINKER_FLAGS=-static
+
+      - name: Build
+        run: cmake --build build-win --parallel
+
+      - name: Show runtime dependencies
+        run: ldd build-win/kdz-tool.exe
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: kdz-tool-windows-x86_64
+          path: build-win/kdz-tool.exe
+          if-no-files-found: error
+
+  android:
+    name: Android ${{ matrix.abi }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        abi: [ arm64-v8a, armeabi-v7a ]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends cmake ninja-build pkg-config curl
+
+      - name: Locate the Android NDK
+        id: ndk
+        run: |
+          set -e
+          NDK="${ANDROID_NDK_LATEST_HOME:-}"
+          if [ -z "$NDK" ]; then NDK=$(ls -d "$ANDROID_HOME"/ndk/* 2>/dev/null | sort -V | tail -1); fi
+          if [ -z "$NDK" ] || [ ! -d "$NDK" ]; then echo "no Android NDK found"; exit 1; fi
+          echo "ndk=$NDK" >> "$GITHUB_OUTPUT"
+          echo "using NDK: $NDK"
+
+      - name: Cross-build zlib and zstd
+        env:
+          NDK: ${{ steps.ndk.outputs.ndk }}
+          ABI: ${{ matrix.abi }}
+        run: |
+          set -eux
+          TC="$NDK/build/cmake/android.toolchain.cmake"
+          PREFIX="$PWD/android-prefix/$ABI"
+          mkdir -p "$PREFIX"
+
+          curl -fsSL -o zlib.tar.gz https://github.com/madler/zlib/archive/refs/tags/v1.3.1.tar.gz
+          tar xf zlib.tar.gz
+          cmake -S zlib-1.3.1 -B zlib-build -G Ninja \
+                -DCMAKE_TOOLCHAIN_FILE="$TC" -DANDROID_ABI="$ABI" -DANDROID_PLATFORM=android-24 \
+                -DCMAKE_INSTALL_PREFIX="$PREFIX" -DCMAKE_BUILD_TYPE=Release \
+                -DZLIB_BUILD_EXAMPLES=OFF -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+          cmake --build zlib-build --parallel
+          cmake --install zlib-build
+
+          curl -fsSL -o zstd.tar.gz https://github.com/facebook/zstd/releases/download/v1.5.6/zstd-1.5.6.tar.gz
+          tar xf zstd.tar.gz
+          cmake -S zstd-1.5.6/build/cmake -B zstd-build -G Ninja \
+                -DCMAKE_TOOLCHAIN_FILE="$TC" -DANDROID_ABI="$ABI" -DANDROID_PLATFORM=android-24 \
+                -DCMAKE_INSTALL_PREFIX="$PREFIX" -DCMAKE_BUILD_TYPE=Release \
+                -DZSTD_BUILD_PROGRAMS=OFF -DZSTD_BUILD_TESTS=OFF -DZSTD_BUILD_SHARED=OFF \
+                -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+          cmake --build zstd-build --parallel
+          cmake --install zstd-build
+
+      - name: Configure kdz-tool
+        env:
+          NDK: ${{ steps.ndk.outputs.ndk }}
+          ABI: ${{ matrix.abi }}
+        run: |
+          set -eux
+          PREFIX="$PWD/android-prefix/$ABI"
+          export PKG_CONFIG_LIBDIR="$PREFIX/lib/pkgconfig"
+          export PKG_CONFIG_SYSROOT_DIR=/
+          cmake -S . -B build-android -G Ninja -DCMAKE_BUILD_TYPE=Release \
+                -DCMAKE_TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake" \
+                -DANDROID_ABI="$ABI" -DANDROID_PLATFORM=android-24 \
+                -DZLIB_ROOT="$PREFIX" -DZLIB_USE_STATIC_LIBS=ON
+
+      - name: Build
+        run: cmake --build build-android --parallel
+
+      - name: Inspect
+        run: file build-android/kdz-tool && ls -l build-android/kdz-tool
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: kdz-tool-android-${{ matrix.abi }}
+          path: build-android/kdz-tool
+          if-no-files-found: error
