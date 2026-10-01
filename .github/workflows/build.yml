@@ -105,7 +105,7 @@ jobs:
           echo "ndk=$NDK" >> "$GITHUB_OUTPUT"
           echo "using NDK: $NDK"
 
-      - name: Cross-build zlib and zstd
+      - name: Cross-build zstd
         env:
           NDK: ${{ steps.ndk.outputs.ndk }}
           ABI: ${{ matrix.abi }}
@@ -115,15 +115,7 @@ jobs:
           PREFIX="$PWD/android-prefix/$ABI"
           mkdir -p "$PREFIX"
 
-          curl -fsSL -o zlib.tar.gz https://github.com/madler/zlib/archive/refs/tags/v1.3.1.tar.gz
-          tar xf zlib.tar.gz
-          cmake -S zlib-1.3.1 -B zlib-build -G Ninja \
-                -DCMAKE_TOOLCHAIN_FILE="$TC" -DANDROID_ABI="$ABI" -DANDROID_PLATFORM=android-24 \
-                -DCMAKE_INSTALL_PREFIX="$PREFIX" -DCMAKE_BUILD_TYPE=Release \
-                -DZLIB_BUILD_EXAMPLES=OFF -DCMAKE_POSITION_INDEPENDENT_CODE=ON
-          cmake --build zlib-build --parallel
-          cmake --install zlib-build
-
+          # zlib comes from the NDK sysroot; only zstd has to be built for the target.
           curl -fsSL -o zstd.tar.gz https://github.com/facebook/zstd/releases/download/v1.5.6/zstd-1.5.6.tar.gz
           tar xf zstd.tar.gz
           cmake -S zstd-1.5.6/build/cmake -B zstd-build -G Ninja \
@@ -146,7 +138,7 @@ jobs:
           cmake -S . -B build-android -G Ninja -DCMAKE_BUILD_TYPE=Release \
                 -DCMAKE_TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake" \
                 -DANDROID_ABI="$ABI" -DANDROID_PLATFORM=android-24 \
-                -DZLIB_ROOT="$PREFIX" -DZLIB_USE_STATIC_LIBS=ON
+                -DZLIB_USE_STATIC_LIBS=ON
 
       - name: Build
         run: cmake --build build-android --parallel

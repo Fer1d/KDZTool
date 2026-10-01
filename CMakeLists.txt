@@ -63,6 +63,12 @@ else()
         ${ZLIB_INCLUDE_DIRS}
         ${ZSTD_INCLUDE_DIRS}
     )
+    # pkg-config reports the library directory separately, so a zstd that lives in a
+    # non-default prefix (Android NDK cross builds, custom installs) needs it too.
+    if(ZSTD_LIBRARY_DIRS)
+        target_link_directories(kdz-tool PRIVATE ${ZSTD_LIBRARY_DIRS})
+    endif()
+
     target_link_libraries(kdz-tool PRIVATE
         ${ZLIB_LIBRARIES}
         ${ZSTD_LIBRARIES}
