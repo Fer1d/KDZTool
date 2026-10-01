@@ -46,6 +46,59 @@ LG 的官方固件使用一种名为 KDZ 的私有容器格式分发。KDZ 文�
 5.  **组装最终 KDZ：** 写出重建的 `.dz`、`SecurePartition` 以及 `components` 目录中的组件，位置与原文件一致。
 6.  **写入最终头：** 数据就位后偏移和大小都已确定，最后构造 KDZ 头（V1/V2/V3）写到文件开头。
 
+## 获取成品
+
+不想编译的话可以直接用成品：每个打了 tag 的 Release 里都有 GitHub Actions 构建好的二进制
+（每次 workflow 运行的 artifact 里也有同样几份）。
+
+| 平台 | 文件 | 说明 |
+| :--- | :--- | :--- |
+| Windows 10/11 x86_64 | `kdz-tool-windows-x86_64.exe` | 单文件，无需安装其它东西 |
+| Linux x86_64 | `kdz-tool-linux-x86_64` | 依赖发行版的 `libz.so.1` 与 `libzstd.so.1` |
+| Android arm64-v8a | `kdz-tool-android-arm64-v8a` | Android 7.0（API 24）及以上 |
+| Android armeabi-v7a | `kdz-tool-android-armeabi-v7a` | 较老的 32 位机型 |
+
+二进制旁边附有 `SHA256SUMS.txt` 校验文件。
+
+### Windows
+
+```powershell
+# 从 Releases 页面下载 kdz-tool-windows-x86_64.exe，然后：
+.\kdz-tool-windows-x86_64.exe extract firmware.kdz -d out --rawprogram
+.\kdz-tool-windows-x86_64.exe repack out my_firmware.kdz
+```
+
+嫌名字长可以改名为 `kdz-tool.exe`。该可执行文件是静态链接的，不需要 VC++ 运行库或 MinGW DLL。
+
+### Linux
+
+```bash
+chmod +x kdz-tool-linux-x86_64
+./kdz-tool-linux-x86_64 extract firmware.kdz -d out --rawprogram
+./kdz-tool-linux-x86_64 repack out my_firmware.kdz
+```
+
+该二进制链接发行版的 zlib 与 zstd，精简系统上先装一下：
+`sudo apt install zlib1g libzstd1`（Debian/Ubuntu）或 `sudo dnf install zlib libzstd`（Fedora）。
+
+### Android
+
+```bash
+adb push kdz-tool-android-arm64-v8a /data/local/tmp/kdz-tool
+adb shell chmod +x /data/local/tmp/kdz-tool
+adb shell /data/local/tmp/kdz-tool extract /sdcard/Download/firmware.kdz -d /data/local/tmp/out --rawprogram
+adb pull /data/local/tmp/out .
+```
+
+  - 选对 ABI：`adb shell getprop ro.product.cpu.abi` 会输出 `arm64-v8a` 或 `armeabi-v7a`。
+  - 输出目录要可写：`/data/local/tmp` 一定可写，Termux 的 home 也可以；写入 `/sdcard` 需要存储权限（Termux 里执行 `termux-setup-storage`）。
+  - 没有 root 的设备无法用本工具刷机，它只负责解包与打包。
+  - Android 产物面向 API 24（Android 7.0）及以上。
+
+### macOS
+
+CI 目前不构建 macOS 版本；请按下文的编译步骤自行编译（`brew install cmake zstd` 提供依赖）。
+
 ## 依赖
 
 编译本项目需要：
@@ -134,7 +187,7 @@ adb shell /data/local/tmp/kdz-tool extract /sdcard/Download/fw.kdz -d /data/loca
 
 ## 用法
 
-命令行提供两个主命令：`extract` 与 `repack`。
+命令行提供两个主命令：`extract` 与 `repack`。下面的示例统一写作 `kdz-tool`，请替换成你下载到的文件名（见 [获取成品](#获取成品)）。
 
 ```
 A tool to extract and repack LG KDZ firmware.

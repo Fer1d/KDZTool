@@ -46,6 +46,61 @@ The tool operates in two main modes: `extract` and `repack`.
 5.  **Assemble Final KDZ:** The tool creates the final KDZ file. It writes the rebuilt `.dz` archive, the `SecurePartition` block, and the other components from the `components` directory at their original offsets.
 6.  **Write Final Header:** With all data in place, the final offsets and sizes are known. The tool constructs the definitive KDZ header (V1, V2, or V3) and writes it to the beginning of the file, completing the process.
 
+## Getting the binaries
+
+You do not have to build anything to use the tool: every tagged release carries binaries built by
+GitHub Actions (the same files are attached as artifacts of each workflow run).
+
+| Platform | File | Notes |
+| :--- | :--- | :--- |
+| Windows 10/11 x86_64 | `kdz-tool-windows-x86_64.exe` | one file, nothing else to install |
+| Linux x86_64 | `kdz-tool-linux-x86_64` | needs `libz.so.1` and `libzstd.so.1` from the distribution |
+| Android arm64-v8a | `kdz-tool-android-arm64-v8a` | Android 7.0 (API 24) or newer |
+| Android armeabi-v7a | `kdz-tool-android-armeabi-v7a` | older 32-bit devices |
+
+`SHA256SUMS.txt` is attached next to the binaries.
+
+### Windows
+
+```powershell
+# download kdz-tool-windows-x86_64.exe from the Releases page, then
+.\kdz-tool-windows-x86_64.exe extract firmware.kdz -d out --rawprogram
+.\kdz-tool-windows-x86_64.exe repack out my_firmware.kdz
+```
+
+Rename it to `kdz-tool.exe` if you prefer shorter commands. The executable is linked statically,
+so no Visual C++ redistributable or MinGW runtime is required.
+
+### Linux
+
+```bash
+chmod +x kdz-tool-linux-x86_64
+./kdz-tool-linux-x86_64 extract firmware.kdz -d out --rawprogram
+./kdz-tool-linux-x86_64 repack out my_firmware.kdz
+```
+
+The binary is linked against the distribution's zlib and zstd, so on a minimal system install them
+first: `sudo apt install zlib1g libzstd1` (Debian/Ubuntu) or `sudo dnf install zlib libzstd` (Fedora).
+
+### Android
+
+```bash
+adb push kdz-tool-android-arm64-v8a /data/local/tmp/kdz-tool
+adb shell chmod +x /data/local/tmp/kdz-tool
+adb shell /data/local/tmp/kdz-tool extract /sdcard/Download/firmware.kdz -d /data/local/tmp/out --rawprogram
+adb pull /data/local/tmp/out .
+```
+
+  - Pick the ABI of the device: `adb shell getprop ro.product.cpu.abi` prints `arm64-v8a` or `armeabi-v7a`.
+  - Write the output somewhere writable: `/data/local/tmp` always is, a Termux home directory is too, and `/sdcard` needs the storage permission (`termux-setup-storage` in Termux).
+  - A device without root cannot flash anything with this tool; it only unpacks and repacks.
+  - The Android builds target API 24 (Android 7.0) and newer.
+
+### macOS
+
+The CI does not build for macOS yet; compile it from source with the instructions below
+(`brew install cmake zstd` provides the dependencies).
+
 ## Prerequisites
 
 To build this project, you will need:
@@ -127,7 +182,7 @@ Notes:
 
 ## Usage
 
-The tool is operated via the command line with two main commands: `extract` and `repack`.
+The tool is operated via the command line with two main commands: `extract` and `repack`. The examples below use `kdz-tool`; replace it with the file you downloaded (see [Getting the binaries](#getting-the-binaries)).
 
 ```
 A tool to extract and repack LG KDZ firmware.
