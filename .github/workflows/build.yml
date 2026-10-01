@@ -201,8 +201,7 @@ jobs:
           set -eux
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" dist/* --clobber
-          else
-            gh release create "$TAG" dist/* \
-              --title "KDZTool $TAG" \
-              --generate-notes
+          elif ! gh release create "$TAG" dist/* --title "KDZTool $TAG" --notes-from-tag; then
+            # fall back to the commit log when the tag carries no annotation
+            gh release create "$TAG" dist/* --title "KDZTool $TAG" --generate-notes
           fi
