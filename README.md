@@ -65,6 +65,64 @@ cmake ..
 make -j$(nproc)
 ```
 
+### Building for Android
+
+The tool is plain C++17 plus zlib/zstd, so it builds for Android in two ways.
+
+**On the device itself (Termux, no cross-compiling):**
+
+```bash
+pkg install clang cmake ninja pkg-config zlib zstd git
+git clone https://github.com/Fer1d/KDZTool.git
+cd KDZTool
+termux-setup-storage                      # grant access to /sdcard
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j$(nproc)
+./build/kdz-tool extract /sdcard/Download/fw.kdz -d /sdcard/Download/out --rawprogram
+```
+
+Termux ships `zlib.pc` and `libzstd.pc`, which is exactly what the build looks for
+outside Windows, and the clang it installs is an ordinary C++17 compiler.
+
+**Cross-compiling with the Android NDK (arm64-v8a shown):**
+
+The NDK sysroot already provides zlib, but zstd has to be built for the target first:
+
+```bash
+export NDK=$HOME/android-ndk-r27
+export TOOLCHAIN=$NDK/build/cmake/android.toolchain.cmake
+export ABI=arm64-v8a
+export PREFIX=$PWD/android-prefix
+
+# 1) zstd for Android (static library plus its pkg-config file)
+git clone --depth 1 https://github.com/facebook/zstd.git
+cmake -S zstd/build/cmake -B zstd-build -G Ninja \
+      -DCMAKE_TOOLCHAIN_FILE=$TOOLCHAIN -DANDROID_ABI=$ABI -DANDROID_PLATFORM=android-24 \
+      -DCMAKE_INSTALL_PREFIX=$PREFIX -DCMAKE_BUILD_TYPE=Release \
+      -DZSTD_BUILD_PROGRAMS=OFF -DZSTD_BUILD_TESTS=OFF -DZSTD_BUILD_SHARED=OFF
+cmake --build zstd-build -j && cmake --install zstd-build
+
+# 2) point pkg-config at that zstd, then build this tool (no CMakeLists change needed)
+export PKG_CONFIG_LIBDIR=$PREFIX/lib/pkgconfig
+export PKG_CONFIG_SYSROOT_DIR=/
+cmake -S . -B build-android -G Ninja \
+      -DCMAKE_TOOLCHAIN_FILE=$TOOLCHAIN -DANDROID_ABI=$ABI -DANDROID_PLATFORM=android-24 \
+      -DCMAKE_BUILD_TYPE=Release
+cmake --build build-android -j
+
+# 3) run it on the device
+adb push build-android/kdz-tool /data/local/tmp/
+adb shell chmod +x /data/local/tmp/kdz-tool
+adb shell /data/local/tmp/kdz-tool extract /sdcard/Download/fw.kdz -d /data/local/tmp/out --rawprogram
+```
+
+Notes:
+
+  - Use `-DANDROID_ABI=x86_64` for an emulator and `armeabi-v7a` for 32-bit devices.
+  - `-DANDROID_PLATFORM=android-24` is what `std::filesystem` and `timegm` need; older levels may fail to compile.
+  - The tool has to read and write firmware, so run it somewhere writable: `/data/local/tmp` (adb push/pull) or a Termux home directory.
+  - Android without root cannot flash anything: this tool only unpacks and repacks. Flashing still needs QFIL, LGUP or similar.
+
 ## Usage
 
 The tool is operated via the command line with two main commands: `extract` and `repack`.

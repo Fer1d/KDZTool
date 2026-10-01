@@ -73,6 +73,63 @@ cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release ^
 cmake --build build -j
 ```
 
+### 安卓（Android）端编译
+
+本工具只用 C++17 加 zlib/zstd，在安卓上有两种编法。
+
+**方法一：直接在手机上用 Termux 编译（推荐，无需交叉编译）**
+
+```bash
+pkg install clang cmake ninja pkg-config zlib zstd git
+git clone https://github.com/Fer1d/KDZTool.git
+cd KDZTool
+termux-setup-storage                      # 授予 /sdcard 访问权限
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j$(nproc)
+./build/kdz-tool extract /sdcard/Download/fw.kdz -d /sdcard/Download/out --rawprogram
+```
+
+Termux 自带 `zlib.pc` 与 `libzstd.pc`，正好是 CMake 在非 Windows 平台查找的东西；它安装的 clang 也是正常的 C++17 编译器。
+
+**方法二：用 Android NDK 交叉编译（以 arm64-v8a 为例）**
+
+NDK 的 sysroot 自带 zlib，但 zstd 必须先为目标架构编一份：
+
+```bash
+export NDK=$HOME/android-ndk-r27
+export TOOLCHAIN=$NDK/build/cmake/android.toolchain.cmake
+export ABI=arm64-v8a
+export PREFIX=$PWD/android-prefix
+
+# 1) 为 Android 编译 zstd（静态库 + pkg-config 文件）
+git clone --depth 1 https://github.com/facebook/zstd.git
+cmake -S zstd/build/cmake -B zstd-build -G Ninja \
+      -DCMAKE_TOOLCHAIN_FILE=$TOOLCHAIN -DANDROID_ABI=$ABI -DANDROID_PLATFORM=android-24 \
+      -DCMAKE_INSTALL_PREFIX=$PREFIX -DCMAKE_BUILD_TYPE=Release \
+      -DZSTD_BUILD_PROGRAMS=OFF -DZSTD_BUILD_TESTS=OFF -DZSTD_BUILD_SHARED=OFF
+cmake --build zstd-build -j && cmake --install zstd-build
+
+# 2) 让 pkg-config 指向上面那份 zstd，再编本工具（CMakeLists 无需改动）
+export PKG_CONFIG_LIBDIR=$PREFIX/lib/pkgconfig
+export PKG_CONFIG_SYSROOT_DIR=/
+cmake -S . -B build-android -G Ninja \
+      -DCMAKE_TOOLCHAIN_FILE=$TOOLCHAIN -DANDROID_ABI=$ABI -DANDROID_PLATFORM=android-24 \
+      -DCMAKE_BUILD_TYPE=Release
+cmake --build build-android -j
+
+# 3) 推到设备上运行
+adb push build-android/kdz-tool /data/local/tmp/
+adb shell chmod +x /data/local/tmp/kdz-tool
+adb shell /data/local/tmp/kdz-tool extract /sdcard/Download/fw.kdz -d /data/local/tmp/out --rawprogram
+```
+
+说明：
+
+  - 模拟器用 `-DANDROID_ABI=x86_64`，32 位设备用 `armeabi-v7a`。
+  - `-DANDROID_PLATFORM=android-24` 是为了 `std::filesystem` 与 `timegm`，更低的 API 等级可能编不过。
+  - 工具需要读写固件，所以要放在可写目录里跑：`/data/local/tmp`（adb 推拉）或 Termux 的 home。
+  - 安卓没有 root 权限时**不能**直接刷机：本工具只负责解包/打包，刷写仍需 QFIL、LGUP 之类的工具。
+
 ## 用法
 
 命令行提供两个主命令：`extract` 与 `repack`。
