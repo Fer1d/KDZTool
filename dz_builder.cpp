@@ -7,6 +7,9 @@
 #include <algorithm>
 #include <iomanip>
 #include <fstream>
+#include <deque>
+#include <algorithm>
+#include <thread>
 #include <iostream>
 #include <cstring>
 #include <stdexcept>
@@ -69,7 +72,8 @@ std::vector<char> DzBuilder::md5_hash(const void *data, size_t size) const
     return std::vector<char>(raw_digest.begin(), raw_digest.end());
 }
 
-std::vector<char> DzBuilder::build(const std::filesystem::path &input_dir, ThreadPool& pool)
+uint64_t DzBuilder::build(const std::filesystem::path &input_dir, ThreadPool &pool,
+                          const std::filesystem::path &temp_path)
 {
     std::cout << "Building DZ file..." << std::endl;
 
@@ -137,16 +141,29 @@ std::vector<char> DzBuilder::build(const std::filesystem::path &input_dir, Threa
     }
     std::cout << "  Using " << sector_size << "-byte DZ sectors." << std::endl;
 
-    std::vector<std::future<ChunkResult>> future_results;
-    future_results.reserve(total_chunk_count);
-
     bool is_v0 = meta["minor"] == 0;
 
-    for (const auto &task_info : tasks_to_process)
+    // The compressed chunks of a large firmware add up to a few GiB. They used to be
+    // queued all at once and kept in memory until the end, which made repacking a
+    // 3.6 GB archive need roughly ten times the RAM it has any business using (and got
+    // the process killed on a machine that is not huge). The tasks now run through a
+    // sliding window and every result is written straight to the temporary file as
+    // soon as it has been consumed.
+    const std::size_t max_in_flight = std::min<std::size_t>(
+        8, std::max<std::size_t>(4, std::thread::hardware_concurrency()));
+
+    std::ofstream dz_out(temp_path, std::ios::binary | std::ios::trunc);
+    if (!dz_out)
     {
-        future_results.emplace_back(
-            pool.enqueue([this, task_info, is_v0, sector_size]
-            {
+        throw std::runtime_error("Failed to create the temporary DZ file: " + temp_path.string());
+    }
+    // Leave room for the main header, which is written once its hashes are known.
+    dz_out.seekp(static_cast<std::streamoff>(sizeof(DzMainHeader)));
+
+    auto enqueue_chunk = [this, &pool, is_v0, sector_size](const ChunkTaskInfo &task_info)
+    {
+        return pool.enqueue([this, task_info, is_v0, sector_size]
+        {
                 // This lambda is the task executed by a worker thread.
 
                 // Print progress in a thread-safe manner
@@ -214,22 +231,49 @@ std::vector<char> DzBuilder::build(const std::filesystem::path &input_dir, Threa
                 }
 
                 return std::make_pair(std::move(chunk_header_data), std::move(compressed_data));
-            })
-        );
-    }
-    
-    // --- Result Collection Phase (Sequential to preserve order) ---
-    std::vector<std::vector<char>> chunk_headers_list(total_chunk_count);
-    std::vector<std::vector<char>> chunk_data_list(total_chunk_count);
+        });
+    };
 
-    for (size_t i = 0; i < total_chunk_count; ++i)
+    std::deque<std::future<ChunkResult>> window;
+    std::size_t next_task = 0;
+    while (next_task < tasks_to_process.size() && window.size() < max_in_flight)
     {
-        // .get() will block until the future is ready.
-        // We iterate sequentially from 0 to N-1 to ensure the final lists are in the correct order.
-        ChunkResult result = future_results[i].get();
-        chunk_headers_list[i] = std::move(result.first);
-        chunk_data_list[i] = std::move(result.second);
+        window.push_back(enqueue_chunk(tasks_to_process[next_task++]));
     }
+
+    // The headers are tiny, so they stay in memory for the hashes below; the payload is
+    // released as soon as it has been written.
+    std::vector<std::vector<char>> chunk_headers_list;
+    chunk_headers_list.reserve(tasks_to_process.size());
+
+    uint64_t payload_size = 0;
+    for (std::size_t i = 0; i < tasks_to_process.size(); ++i)
+    {
+        // .get() blocks until the chunk is ready. Consuming the tasks in order is what
+        // keeps the chunk stream - and every hash over it - in the right order.
+        ChunkResult result = window.front().get();
+        window.pop_front();
+
+        dz_out.write(result.first.data(), static_cast<std::streamsize>(result.first.size()));
+        dz_out.write(result.second.data(), static_cast<std::streamsize>(result.second.size()));
+        if (!dz_out)
+        {
+            throw std::runtime_error("Failed to write the temporary DZ file: " + temp_path.string());
+        }
+        payload_size += result.first.size() + result.second.size();
+        chunk_headers_list.push_back(std::move(result.first));
+
+        if (next_task < tasks_to_process.size())
+        {
+            window.push_back(enqueue_chunk(tasks_to_process[next_task++]));
+        }
+    }
+    dz_out.flush();
+    if (!dz_out)
+    {
+        throw std::runtime_error("Failed to write the temporary DZ file: " + temp_path.string());
+    }
+
 
     // Stage 2: Calculating final hashes for the DZ header
     std::cout << "  Stage 2: Calculating final hashes for the DZ header..." << std::endl;
@@ -344,28 +388,46 @@ std::vector<char> DzBuilder::build(const std::filesystem::path &input_dir, Threa
 
     MD5 data_hasher;
     data_hasher.update(reinterpret_cast<const unsigned char *>(&header_for_data_hash), sizeof(header_for_data_hash));
-    for (size_t i = 0; i < chunk_headers_list.size(); ++i)
     {
-        data_hasher.update(reinterpret_cast<const unsigned char *>(chunk_headers_list[i].data()), chunk_headers_list[i].size());
-        data_hasher.update(reinterpret_cast<const unsigned char *>(chunk_data_list[i].data()), chunk_data_list[i].size());
+        // The hash covers the main header followed by every chunk header and its data,
+        // so the header has to be known first; the payload is read back from the file
+        // that was just written instead of being held in memory for a second pass.
+        std::ifstream payload_in(temp_path, std::ios::binary);
+        if (!payload_in)
+        {
+            throw std::runtime_error("Failed to read back the temporary DZ file: " + temp_path.string());
+        }
+        payload_in.seekg(static_cast<std::streamoff>(sizeof(DzMainHeader)));
+
+        std::vector<char> buffer(4u << 20);
+        while (payload_in)
+        {
+            payload_in.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
+            const std::streamsize got = payload_in.gcount();
+            if (got > 0)
+            {
+                data_hasher.update(buffer.data(), static_cast<MD5::size_type>(got));
+            }
+        }
     }
     data_hasher.finalize();
     auto data_hash_digest_vec = data_hasher.get_raw_digest();
 
-    // Stage 3: Assembling the final DZ file
-    std::cout << "  Stage 3: Assembling the final DZ file..." << std::endl;
+    // Stage 3: putting the main header in front of the chunk stream
+    std::cout << "  Stage 3: Writing the DZ header in front of the chunk stream..." << std::endl;
     DzMainHeader final_header = proto_header;
     final_header.header_crc = header_crc;
     std::memcpy(final_header.data_hash, data_hash_digest_vec.data(), data_hash_digest_vec.size());
 
-    std::vector<char> dz_buffer;
-    dz_buffer.insert(dz_buffer.end(), reinterpret_cast<char *>(&final_header), reinterpret_cast<char *>(&final_header) + sizeof(final_header));
-    for (size_t i = 0; i < chunk_headers_list.size(); ++i)
+    dz_out.seekp(0);
+    dz_out.write(reinterpret_cast<const char *>(&final_header), sizeof(final_header));
+    dz_out.close();
+    if (!dz_out)
     {
-        dz_buffer.insert(dz_buffer.end(), chunk_headers_list[i].begin(), chunk_headers_list[i].end());
-        dz_buffer.insert(dz_buffer.end(), chunk_data_list[i].begin(), chunk_data_list[i].end());
+        throw std::runtime_error("Failed to finish the temporary DZ file: " + temp_path.string());
     }
 
-    std::cout << "DZ file built successfully (" << dz_buffer.size() << " bytes)." << std::endl;
-    return dz_buffer;
+    const uint64_t dz_size = static_cast<uint64_t>(sizeof(final_header)) + payload_size;
+    std::cout << "DZ file built successfully (" << dz_size << " bytes)." << std::endl;
+    return dz_size;
 }

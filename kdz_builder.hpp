@@ -41,8 +41,11 @@ public:
 
     explicit KdzBuilder(const json& metadata) : meta(metadata["kdz"]) {}
 
-    void build(const std::filesystem::path& output_path, const std::filesystem::path& input_dir, 
-               const std::vector<char>& dz_data, const std::vector<char>& sec_part_data);
+    // dz_path/dz_size describe the DZ archive that DzBuilder wrote to disk; it is copied
+    // into the output through a window instead of being held in memory.
+    void build(const std::filesystem::path& output_path, const std::filesystem::path& input_dir,
+               const std::filesystem::path& dz_path, uint64_t dz_size,
+               const std::vector<char>& sec_part_data);
 };
 
 #endif

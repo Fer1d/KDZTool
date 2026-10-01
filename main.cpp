@@ -241,14 +241,29 @@ int main(int argc, char* argv[]) {
             // 1. Create Secure Partition data (if it exists)
             SecurePartitionBuilder sec_part_builder(metadata);
 
-            // 2. Use the thread pool to create DZ archive data
+            // 2. Use the thread pool to create the DZ archive. It is written to a
+            //    temporary file next to the output, so the archive never has to fit in
+            //    memory; the guard removes it again on the way out, exceptions included.
             std::cout << "Using " << num_threads << " threads for parallel processing." << std::endl;
+            fs::path dz_temp = output_file;
+            dz_temp += ".dz.tmp";
+
+            struct TempFileGuard
+            {
+                fs::path path;
+                ~TempFileGuard()
+                {
+                    std::error_code ec;
+                    fs::remove(path, ec);
+                }
+            } dz_guard{dz_temp};
+
             DzBuilder dz_builder(metadata);
-            auto dz_binary_data = dz_builder.build(input_dir, pool);
+            const uint64_t dz_size = dz_builder.build(input_dir, pool, dz_temp);
 
             // 3. Creating the final KDZ profile
             KdzBuilder kdz_builder(metadata);
-            kdz_builder.build(output_file, input_dir, dz_binary_data, sec_part_builder.data);
+            kdz_builder.build(output_file, input_dir, dz_temp, dz_size, sec_part_builder.data);
         } else {
             std::cerr << "Error: Unknown command '" << command << "'. Use 'extract' or 'repack'." << std::endl;
             printUsage(argv[0]);

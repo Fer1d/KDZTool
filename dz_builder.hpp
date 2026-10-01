@@ -18,7 +18,11 @@ private:
 
 public:
     explicit DzBuilder(const json& metadata) : meta(metadata["dz"]) {}
-    std::vector<char> build(const std::filesystem::path& input_dir, ThreadPool& pool);
+    // Writes the DZ (main header, chunk headers and compressed data) to temp_path and
+    // returns its size. The payload is streamed instead of being collected in memory,
+    // so the archive never has to fit in RAM.
+    uint64_t build(const std::filesystem::path& input_dir, ThreadPool& pool,
+                   const std::filesystem::path& temp_path);
 };
 
 #endif
