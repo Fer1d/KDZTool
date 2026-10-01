@@ -163,10 +163,11 @@ void extract_dz_parts(const std::string& in_path, const DzHeader& dz_hdr, const 
             const SlotDecision slot = decide_slot(dz_hdr.parts, hw_part, pname,
                                                   static_cast<uint32_t>(sector_size), flash_layout, keep_b,
                                                   dz_hdr.gpt_info());
-            if (slot.reuse_a) {
-                std::cout << "  part " << pname << ": not extracted, it is flashed from "
-                          << slot.layout.runs.front().file_name << " (" << slot.a_name << ")"
-                          << (slot.identical ? "" : ", although the data the DZ stores for it differs")
+            if (slot.reuse) {
+                std::cout << "  part " << pname << ": not extracted, its entries flash "
+                          << slot.layout.runs.front().file_name << " (from " << slot.source_name;
+                if (slot.source_lun != hw_part) std::cout << " on LUN " << slot.source_lun;
+                std::cout << ")" << (slot.identical ? "" : ", although the data the DZ stores for it differs")
                           << std::endl;
                 continue;
             }

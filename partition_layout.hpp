@@ -21,6 +21,10 @@
 // reference tools use (LUN 1 -> "B.", LUN 2 -> "C.", ...), which is what keeps the
 // seven PrimaryGPT/BackupGPT images apart.
 
+// A partition is only split into chunk files when the empty space it does not have
+// to write is larger than this.
+static const uint64_t SPLIT_MIN_SAVING_BYTES = 32ull * 1024 * 1024;
+
 struct PartitionRun {
     uint64_t start_sector = 0;   // first sector on the device
     uint64_t sectors = 0;        // sectors the run covers
@@ -70,7 +74,13 @@ inline PartitionLayout compute_partition_layout(const std::vector<DzHeader::Chun
     }
 
     layout.total_sectors = (highest_end > layout.base_sector) ? highest_end - layout.base_sector : 0;
-    layout.dense = (layout.total_sectors == 0) || (data_sectors * 2 >= layout.total_sectors);
+
+    // Splitting a partition into chunk files only pays off when the holes it leaves
+    // out are worth it: writing one padded image for a mostly empty 4 MiB partition
+    // costs 4 MiB, while turning it into five two-sector files helps nobody.
+    const uint64_t empty_sectors = (layout.total_sectors > data_sectors) ? layout.total_sectors - data_sectors : 0;
+    layout.dense = (layout.total_sectors == 0) || (data_sectors * 2 >= layout.total_sectors) ||
+                   (empty_sectors * sector_size < SPLIT_MIN_SAVING_BYTES);
 
     if (layout.dense) {
         PartitionRun run;
@@ -163,11 +173,32 @@ inline PartitionLayout mirror_layout(const PartitionLayout& source, uint64_t new
     return layout;
 }
 
+// Does the A/B slot rule apply: is there an A slot on the same LUN whose image fits
+// into this B partition?
+inline bool b_slot_reuse(const DzParts& parts, uint32_t lun, const std::string& name,
+                         uint32_t sector_size, const std::optional<GptInfo>& gpt) {
+    std::string a_name;
+    if (!is_b_slot(name, a_name)) return false;
+
+    const std::vector<DzHeader::Chunk>* a_chunks = find_partition_chunks(parts, lun, a_name);
+    const std::vector<DzHeader::Chunk>* b_chunks = find_partition_chunks(parts, lun, name);
+    if (a_chunks == nullptr || b_chunks == nullptr || a_chunks->empty() || b_chunks->empty()) return false;
+
+    const PartitionLayout a_layout = compute_partition_layout(*a_chunks, sector_size, lun, a_name);
+    if (a_layout.runs.empty() || a_layout.total_sectors == 0) return false;
+
+    // Flashing the A image into the B slot must not run past the B partition.
+    const uint64_t b_sectors = gpt_partition_sectors(gpt, name);
+    return b_sectors == 0 || b_sectors >= a_layout.total_sectors;
+}
+
 struct SlotDecision {
-    bool reuse_a = false;          // flash this partition from the A slot image
-    bool identical = true;         // the data the DZ stores for it matches the A slot
-    std::string a_name;            // the A partition the data comes from
-    PartitionLayout layout;        // layout to describe it with (A files, B position)
+    bool reuse = false;           // do not extract: flash from another partition's files
+    bool b_slot = false;          // this is an A/B slot pair
+    bool identical = true;        // the DZ stores the same data for both
+    uint32_t source_lun = 0;      // partition the data comes from
+    std::string source_name;
+    PartitionLayout layout;       // layout to describe this partition with
 };
 
 inline SlotDecision decide_slot(const DzParts& parts, uint32_t lun, const std::string& name,
@@ -176,24 +207,61 @@ inline SlotDecision decide_slot(const DzParts& parts, uint32_t lun, const std::s
     SlotDecision decision;
     if (!flash_layout || keep_b) return decision;
 
+    const std::vector<DzHeader::Chunk>* own = find_partition_chunks(parts, lun, name);
+    if (own == nullptr || own->empty()) return decision;
+    const uint64_t own_base = own->front().part_start_sector;
+
+    // 1. B slot: flashed from the image of its A slot on the same LUN.
     std::string a_name;
-    if (!is_b_slot(name, a_name)) return decision;
+    if (is_b_slot(name, a_name) && b_slot_reuse(parts, lun, name, sector_size, gpt)) {
+        const std::vector<DzHeader::Chunk>* a_chunks = find_partition_chunks(parts, lun, a_name);
+        const PartitionLayout a_layout = compute_partition_layout(*a_chunks, sector_size, lun, a_name);
+        decision.reuse = true;
+        decision.b_slot = true;
+        decision.source_lun = lun;
+        decision.source_name = a_name;
+        decision.layout = mirror_layout(a_layout, own_base);
+        decision.identical = same_chunk_signature(*a_chunks, *own);
+        return decision;
+    }
 
-    const std::vector<DzHeader::Chunk>* a_chunks = find_partition_chunks(parts, lun, a_name);
-    const std::vector<DzHeader::Chunk>* b_chunks = find_partition_chunks(parts, lun, name);
-    if (a_chunks == nullptr || b_chunks == nullptr || a_chunks->empty() || b_chunks->empty()) return decision;
-
-    const PartitionLayout a_layout = compute_partition_layout(*a_chunks, sector_size, lun, a_name);
-    if (a_layout.runs.empty() || a_layout.total_sectors == 0) return decision;
-
-    // Flashing the A image into the B slot must not run past the B partition.
-    const uint64_t b_sectors = gpt_partition_sectors(gpt, name);
-    if (b_sectors != 0 && b_sectors < a_layout.total_sectors) return decision;
-
-    decision.reuse_a = true;
-    decision.a_name = a_name;
-    decision.layout = mirror_layout(a_layout, b_chunks->front().part_start_sector);
-    decision.identical = same_chunk_signature(*a_chunks, *b_chunks);
+    // 2. Any partition whose chunk metadata proves it holds the very same bytes is
+    //    not extracted either. That is how the xbl partitions of LUN 2, whose A slot
+    //    lives on LUN 1, still share one file. The lexicographically smallest twin is
+    //    the one that gets extracted, so nothing depends on the iteration order.
+    // The lexicographically first partition of an identical group is the one that is
+    // extracted; every other one flashes from its files. Comparing against the group
+    // minimum (this partition included) makes the choice independent of the order the
+    // partitions are visited in - without it two twins would mirror each other and
+    // neither would be extracted.
+    const std::vector<DzHeader::Chunk>* first = nullptr;
+    uint32_t first_lun = lun;
+    std::string first_name = name;
+    for (std::size_t i = 0; i < parts.size(); ++i) {
+        const uint32_t other_lun = parts[i].first;
+        for (std::size_t k = 0; k < parts[i].second.size(); ++k) {
+            const std::string& other_name = parts[i].second[k].first;
+            const std::vector<DzHeader::Chunk>& other = parts[i].second[k].second;
+            if (other.empty()) continue;
+            if (!same_chunk_signature(other, *own)) continue;
+            if (other_lun < first_lun || (other_lun == first_lun && other_name < first_name)) {
+                first = &other;
+                first_lun = other_lun;
+                first_name = other_name;
+            }
+        }
+    }
+    if (first != nullptr && !(first_lun == lun && first_name == name)) {
+        const PartitionLayout first_layout = compute_partition_layout(*first, sector_size, first_lun, first_name);
+        if (!first_layout.runs.empty()) {
+            decision.reuse = true;
+            decision.b_slot = false;
+            decision.source_lun = first_lun;
+            decision.source_name = first_name;
+            decision.layout = mirror_layout(first_layout, own_base);
+            decision.identical = true;
+        }
+    }
     return decision;
 }
 

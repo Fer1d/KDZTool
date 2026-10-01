@@ -94,14 +94,14 @@ std::vector<PartitionInfo> collect_partitions(const DzHeader& dz_hdr, uint32_t s
             // A B slot is not extracted; its entries point at the image of the A slot.
             const SlotDecision slot = decide_slot(dz_hdr.parts, info.lun, info.name, sector_size, true,
                                                   keep_b, dz_hdr.gpt_info());
-            if (slot.reuse_a) {
+            if (slot.reuse) {
                 info.mirrored = true;
                 info.layout = slot.layout;
                 if (!slot.identical) {
                     diag.warn("b-slot", "the B slot partition '" + info.name + "' is flashed from " +
                                             slot.layout.runs.front().file_name +
                                             " although the data the DZ stores for it differs from '" +
-                                            slot.a_name + "'");
+                                            slot.source_name + "'");
                 }
             }
             partitions.push_back(info);
