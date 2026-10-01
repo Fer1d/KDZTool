@@ -57,6 +57,8 @@ To build this project, you will need:
 
 ## Building
 
+Prebuilt binaries for Windows, Linux and Android are built by GitHub Actions and attached to every tagged release on the [Releases](https://github.com/Fer1d/KDZTool/releases) page.
+
 The project can be built using a standard C++ compiler and CMake. For example, under Linux distros, you can compile with a command like this:
 
 ```bash

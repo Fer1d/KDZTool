@@ -57,6 +57,8 @@ LG 的官方固件使用一种名为 KDZ 的私有容器格式分发。KDZ 文�
 
 ## 编译
 
+Windows / Linux / Android 的成品由 GitHub Actions 自动构建，并附加到每个打了 tag 的 [Release](https://github.com/Fer1d/KDZTool/releases) 上。
+
 用标准 C++ 编译器加 CMake 即可。例如在 Linux 下：
 
 ```bash
