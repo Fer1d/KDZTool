@@ -45,9 +45,11 @@ void printUsage(const char* progName) {
     std::cerr << "                         flashing them from the A slot image (--rawprogram only)." << std::endl;
     std::cerr << "    --sector-size <n>    Override the detected sector size (power of two, 512..65536)." << std::endl << std::endl;
     std::cerr << "Options for 'repack':" << std::endl;
-    std::cerr << "  " << progName << " repack <input_dir> <output_file>" << std::endl;
+    std::cerr << "  " << progName << " repack <input_dir> <output_file> [--compression <n>]" << std::endl;
     std::cerr << "    <input_dir>          Path to the directory containing extracted files and metadata.json." << std::endl;
-    std::cerr << "    <output_file>        Path for the new output KDZ file." << std::endl << std::endl;
+    std::cerr << "    <output_file>        Path for the new output KDZ file." << std::endl;
+    std::cerr << "    --compression <n>    Compression level from 1 (fastest) to 22 (smallest)." << std::endl;
+    std::cerr << "                         The default is the compression library's own default." << std::endl << std::endl;
     std::cerr << "General Options:" << std::endl;
     std::cerr << "  -h, --help           Show this help message and exit." << std::endl;
 }
@@ -221,14 +223,39 @@ int main(int argc, char* argv[]) {
                           << std::endl;
             }
         } else if (command == "repack") {
-            if (argc != 4) {
+            if (argc < 4) {
                 std::cerr << "Error: Invalid number of arguments for repack command." << std::endl;
-                std::cerr << "Usage: " << argv[0] << " repack <input_dir> <output_file>" << std::endl;
+                std::cerr << "Usage: " << argv[0] << " repack <input_dir> <output_file> [--compression <1-22>]" << std::endl;
                 return 1;
             }
 
             fs::path input_dir(argv[2]);
             fs::path output_file(argv[3]);
+            int compression_level = -1;
+
+            for (int i = 4; i < argc; ++i) {
+                std::string arg = argv[i];
+                if (arg == "--compression") {
+                    if (i + 1 >= argc) {
+                        std::cerr << "Error: --compression requires an argument." << std::endl;
+                        return 1;
+                    }
+                    try {
+                        const int value = std::stoi(argv[++i]);
+                        if (value < 1 || value > 22) {
+                            std::cerr << "Error: --compression must be between 1 (fastest) and 22 (smallest)." << std::endl;
+                            return 1;
+                        }
+                        compression_level = value;
+                    } catch (const std::exception&) {
+                        std::cerr << "Error: --compression expects a number." << std::endl;
+                        return 1;
+                    }
+                } else {
+                    std::cerr << "Error: Unknown option '" << arg << "' for repack." << std::endl;
+                    return 1;
+                }
+            }
 
             auto metadata_path = input_dir / "metadata.json";
             if (!fs::exists(metadata_path)) {
@@ -241,29 +268,24 @@ int main(int argc, char* argv[]) {
             // 1. Create Secure Partition data (if it exists)
             SecurePartitionBuilder sec_part_builder(metadata);
 
-            // 2. Use the thread pool to create the DZ archive. It is written to a
-            //    temporary file next to the output, so the archive never has to fit in
-            //    memory; the guard removes it again on the way out, exceptions included.
+            // 2. Use the thread pool to create the DZ archive. It is streamed straight
+            //    into the output file while the KDZ is assembled, so the archive never
+            //    has to fit in memory nor in a second copy on disk.
             std::cout << "Using " << num_threads << " threads for parallel processing." << std::endl;
-            fs::path dz_temp = output_file;
-            dz_temp += ".dz.tmp";
+            if (compression_level >= 0) {
+                std::cout << "Using compression level " << compression_level << "." << std::endl;
+            }
 
-            struct TempFileGuard
-            {
-                fs::path path;
-                ~TempFileGuard()
-                {
-                    std::error_code ec;
-                    fs::remove(path, ec);
-                }
-            } dz_guard{dz_temp};
-
-            DzBuilder dz_builder(metadata);
-            const uint64_t dz_size = dz_builder.build(input_dir, pool, dz_temp);
+            DzBuilder dz_builder(metadata, compression_level);
 
             // 3. Creating the final KDZ profile
             KdzBuilder kdz_builder(metadata);
-            kdz_builder.build(output_file, input_dir, dz_temp, dz_size, sec_part_builder.data);
+            kdz_builder.build(output_file, input_dir,
+                              [&](std::ofstream& out, uint64_t offset, const fs::path& path)
+                              {
+                                  return dz_builder.build(input_dir, pool, out, offset, path);
+                              },
+                              sec_part_builder.data);
         } else {
             std::cerr << "Error: Unknown command '" << command << "'. Use 'extract' or 'repack'." << std::endl;
             printUsage(argv[0]);

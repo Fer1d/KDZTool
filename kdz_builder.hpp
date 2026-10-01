@@ -3,6 +3,8 @@
 
 #include <vector>
 #include <map>
+#include <functional>
+#include <fstream>
 #include <string>
 #include <filesystem>
 #include <cstdint>
@@ -41,11 +43,14 @@ public:
 
     explicit KdzBuilder(const json& metadata) : meta(metadata["kdz"]) {}
 
-    // dz_path/dz_size describe the DZ archive that DzBuilder wrote to disk; it is copied
-    // into the output through a window instead of being held in memory.
+    // The DZ archive is written by a callback so that it can be streamed straight into
+    // the output file: it receives the open stream, the offset the archive starts at
+    // and the output path (the DZ hashes need to read the payload back), and returns
+    // the number of bytes it wrote.
+    using DzWriter = std::function<uint64_t(std::ofstream&, uint64_t, const std::filesystem::path&)>;
+
     void build(const std::filesystem::path& output_path, const std::filesystem::path& input_dir,
-               const std::filesystem::path& dz_path, uint64_t dz_size,
-               const std::vector<char>& sec_part_data);
+               const DzWriter& write_dz, const std::vector<char>& sec_part_data);
 };
 
 #endif

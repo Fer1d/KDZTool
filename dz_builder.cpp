@@ -26,7 +26,7 @@ std::vector<char> DzBuilder::compress_data(const std::vector<char> &input) const
     if (comp_type == "zlib")
     {
         z_stream strm = {};
-        if (deflateInit(&strm, Z_DEFAULT_COMPRESSION) != Z_OK)
+        if (deflateInit(&strm, compression_level_ >= 0 ? compression_level_ : Z_DEFAULT_COMPRESSION) != Z_OK)
         {
             throw std::runtime_error("zlib deflateInit failed");
         }
@@ -49,7 +49,8 @@ std::vector<char> DzBuilder::compress_data(const std::vector<char> &input) const
     {
         size_t bound = ZSTD_compressBound(input.size());
         compressed_data.resize(bound);
-        size_t compressed_size = ZSTD_compress(compressed_data.data(), bound, input.data(), input.size(), ZSTD_CLEVEL_DEFAULT);
+        const int level = compression_level_ >= 0 ? compression_level_ : ZSTD_CLEVEL_DEFAULT;
+        size_t compressed_size = ZSTD_compress(compressed_data.data(), bound, input.data(), input.size(), level);
         if (ZSTD_isError(compressed_size))
         {
             throw std::runtime_error("zstd compression failed: " + std::string(ZSTD_getErrorName(compressed_size)));
@@ -72,8 +73,8 @@ std::vector<char> DzBuilder::md5_hash(const void *data, size_t size) const
     return std::vector<char>(raw_digest.begin(), raw_digest.end());
 }
 
-uint64_t DzBuilder::build(const std::filesystem::path &input_dir, ThreadPool &pool,
-                          const std::filesystem::path &temp_path)
+uint64_t DzBuilder::build(const std::filesystem::path &input_dir, ThreadPool &pool, std::ofstream &out,
+                          uint64_t offset, const std::filesystem::path &output_path)
 {
     std::cout << "Building DZ file..." << std::endl;
 
@@ -152,13 +153,13 @@ uint64_t DzBuilder::build(const std::filesystem::path &input_dir, ThreadPool &po
     const std::size_t max_in_flight = std::min<std::size_t>(
         8, std::max<std::size_t>(4, std::thread::hardware_concurrency()));
 
-    std::ofstream dz_out(temp_path, std::ios::binary | std::ios::trunc);
+    std::ofstream &dz_out = out;
+    // Leave room for the main header, which is written once its hashes are known.
+    dz_out.seekp(static_cast<std::streamoff>(offset + sizeof(DzMainHeader)));
     if (!dz_out)
     {
-        throw std::runtime_error("Failed to create the temporary DZ file: " + temp_path.string());
+        throw std::runtime_error("Failed to seek in the output file: " + output_path.string());
     }
-    // Leave room for the main header, which is written once its hashes are known.
-    dz_out.seekp(static_cast<std::streamoff>(sizeof(DzMainHeader)));
 
     auto enqueue_chunk = [this, &pool, is_v0, sector_size](const ChunkTaskInfo &task_info)
     {
@@ -258,7 +259,7 @@ uint64_t DzBuilder::build(const std::filesystem::path &input_dir, ThreadPool &po
         dz_out.write(result.second.data(), static_cast<std::streamsize>(result.second.size()));
         if (!dz_out)
         {
-            throw std::runtime_error("Failed to write the temporary DZ file: " + temp_path.string());
+            throw std::runtime_error("Failed to write the DZ data: " + output_path.string());
         }
         payload_size += result.first.size() + result.second.size();
         chunk_headers_list.push_back(std::move(result.first));
@@ -271,7 +272,7 @@ uint64_t DzBuilder::build(const std::filesystem::path &input_dir, ThreadPool &po
     dz_out.flush();
     if (!dz_out)
     {
-        throw std::runtime_error("Failed to write the temporary DZ file: " + temp_path.string());
+        throw std::runtime_error("Failed to write the DZ data: " + output_path.string());
     }
 
 
@@ -392,12 +393,12 @@ uint64_t DzBuilder::build(const std::filesystem::path &input_dir, ThreadPool &po
         // The hash covers the main header followed by every chunk header and its data,
         // so the header has to be known first; the payload is read back from the file
         // that was just written instead of being held in memory for a second pass.
-        std::ifstream payload_in(temp_path, std::ios::binary);
+        std::ifstream payload_in(output_path, std::ios::binary);
         if (!payload_in)
         {
-            throw std::runtime_error("Failed to read back the temporary DZ file: " + temp_path.string());
+            throw std::runtime_error("Failed to read the DZ data back: " + output_path.string());
         }
-        payload_in.seekg(static_cast<std::streamoff>(sizeof(DzMainHeader)));
+        payload_in.seekg(static_cast<std::streamoff>(offset + sizeof(DzMainHeader)));
 
         std::vector<char> buffer(4u << 20);
         while (payload_in)
@@ -419,12 +420,12 @@ uint64_t DzBuilder::build(const std::filesystem::path &input_dir, ThreadPool &po
     final_header.header_crc = header_crc;
     std::memcpy(final_header.data_hash, data_hash_digest_vec.data(), data_hash_digest_vec.size());
 
-    dz_out.seekp(0);
+    dz_out.seekp(static_cast<std::streamoff>(offset));
     dz_out.write(reinterpret_cast<const char *>(&final_header), sizeof(final_header));
-    dz_out.close();
+    dz_out.flush();
     if (!dz_out)
     {
-        throw std::runtime_error("Failed to finish the temporary DZ file: " + temp_path.string());
+        throw std::runtime_error("Failed to write the DZ header: " + output_path.string());
     }
 
     const uint64_t dz_size = static_cast<uint64_t>(sizeof(final_header)) + payload_size;

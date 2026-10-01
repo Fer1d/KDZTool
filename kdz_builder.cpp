@@ -6,58 +6,6 @@
 #include <stdexcept>
 #include <algorithm>
 
-namespace {
-
-// A single f.write() of a few GiB keeps the console silent for minutes, which is
-// indistinguishable from a hang, and it makes the kernel hold the whole buffer as
-// dirty memory. Copying through a window fixes both.
-void copy_file_with_progress(std::ofstream &f, const std::filesystem::path &source, uint64_t size,
-                             const std::string &label)
-{
-    if (size == 0)
-    {
-        return;
-    }
-
-    std::ifstream in(source, std::ios::binary);
-    if (!in)
-    {
-        throw std::runtime_error("Failed to open " + source.string() + " for reading");
-    }
-
-    const std::size_t window = 32u * 1024 * 1024;
-    std::vector<char> buffer(window);
-    uint64_t copied = 0;
-    int last_percent = -10;
-
-    while (copied < size)
-    {
-        const std::size_t want = static_cast<std::size_t>(std::min<uint64_t>(window, size - copied));
-        in.read(buffer.data(), static_cast<std::streamsize>(want));
-        const std::streamsize got = in.gcount();
-        if (got <= 0)
-        {
-            throw std::runtime_error("Unexpected end of " + source.string());
-        }
-        f.write(buffer.data(), got);
-        if (!f)
-        {
-            throw std::runtime_error("Failed to write " + label + " to the output file");
-        }
-        copied += static_cast<uint64_t>(got);
-
-        const int percent = static_cast<int>((copied * 100) / size);
-        if (percent >= last_percent + 10 || copied == size)
-        {
-            std::cout << "    " << label << ": " << percent << "% (" << (copied >> 20) << " MiB)"
-                      << std::endl;
-            last_percent = percent;
-        }
-    }
-}
-
-} // namespace
-
 std::vector<char> KdzBuilder::build_v1_header(const std::map<std::string, RecordInfo> &records_info)
 {
     std::vector<char> buffer(KDZV1_HDR_SIZE, 0);
@@ -212,8 +160,7 @@ std::vector<char> KdzBuilder::build_v3_header(const std::map<std::string, Record
 }
 
 void KdzBuilder::build(const std::filesystem::path &output_path, const std::filesystem::path &input_dir,
-                       const std::filesystem::path &dz_path, uint64_t dz_size,
-                       const std::vector<char> &sec_part_data)
+                       const DzWriter &write_dz, const std::vector<char> &sec_part_data)
 {
 
     std::cout << "\nAssembling final KDZ file..." << std::endl;
@@ -259,8 +206,7 @@ void KdzBuilder::build(const std::filesystem::path &output_path, const std::file
 
         if (name.find(".dz") != std::string::npos)
         {
-            copy_file_with_progress(f, dz_path, dz_size, name);
-            current_size = dz_size;
+            current_size = write_dz(f, current_offset, output_path);
         }
         else
         {
