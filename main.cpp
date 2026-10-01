@@ -15,6 +15,7 @@
 #include "dz_parser.hpp"
 #include "extractor.hpp"
 #include "metadata_generator.hpp"
+#include "rawprogram_generator.hpp"
 
 // --- Headers required for repacking ---
 #include "secure_partition_builder.hpp"
@@ -31,12 +32,16 @@ void printUsage(const char* progName) {
     std::cerr << "  repack     Repack an extracted folder into a KDZ file." << std::endl << std::endl;
     std::cerr << "Options for 'extract':" << std::endl;
     std::cerr << "  " << progName << " extract <kdz_file> [-d <path>] [--no-verify] [--strict]" << std::endl;
+    std::cerr << "                                      [--rawprogram] [--sector-size <bytes>]" << std::endl;
     std::cerr << "    <kdz_file>           Path to the input KDZ firmware file." << std::endl;
     std::cerr << "    -d, --dest <path>    The directory to extract files to." << std::endl;
     std::cerr << "                         (If not specified, only header info will be printed)." << std::endl;
     std::cerr << "    --no-verify          Skip DZ data hash verification for faster startup." << std::endl;
     std::cerr << "    --strict             Abort on consistency problems (checksum mismatches," << std::endl;
-    std::cerr << "                         unexpected field values) instead of warning about them." << std::endl << std::endl;
+    std::cerr << "                         unexpected field values) instead of warning about them." << std::endl;
+    std::cerr << "    --rawprogram         Also write rawprogram<N>.xml and patch<N>.xml for a 9008/EDL" << std::endl;
+    std::cerr << "                         (QFIL) flash. Requires -d." << std::endl;
+    std::cerr << "    --sector-size <n>    Override the detected sector size (power of two, 512..65536)." << std::endl << std::endl;
     std::cerr << "Options for 'repack':" << std::endl;
     std::cerr << "  " << progName << " repack <input_dir> <output_file>" << std::endl;
     std::cerr << "    <input_dir>          Path to the directory containing extracted files and metadata.json." << std::endl;
@@ -71,6 +76,8 @@ int main(int argc, char* argv[]) {
             std::optional<std::string> extract_path;
             bool skip_verification = false;
             bool strict = false;
+            bool rawprogram = false;
+            std::optional<uint32_t> sector_size_override;
 
             for (int i = 2; i < argc; ++i) {
                 std::string arg = argv[i];
@@ -78,6 +85,26 @@ int main(int argc, char* argv[]) {
                     skip_verification = true;
                 } else if (arg == "--strict") {
                     strict = true;
+                } else if (arg == "--rawprogram") {
+                    rawprogram = true;
+                } else if (arg == "--sector-size") {
+                    if (i + 1 < argc) {
+                        try {
+                            const unsigned long value = std::stoul(argv[++i]);
+                            if (value < 512 || value > 65536 || (value & (value - 1)) != 0) {
+                                std::cerr << "Error: --sector-size must be a power of two between 512 and 65536." << std::endl;
+                                return 1;
+                            }
+                            sector_size_override = static_cast<uint32_t>(value);
+                        } catch (const std::exception&) {
+                            std::cerr << "Error: --sector-size expects a number." << std::endl;
+                            return 1;
+                        }
+                    } else {
+                        std::cerr << "Error: " << arg << " option requires an argument." << std::endl;
+                        printUsage(argv[0]);
+                        return 1;
+                    }
                 } else if (arg == "-d" || arg == "--dest") {
                     if (i + 1 < argc) {
                         extract_path = argv[++i];
@@ -99,6 +126,11 @@ int main(int argc, char* argv[]) {
             if (file_path.empty()) {
                 std::cerr << "Error: Input KDZ file not specified for extract command." << std::endl;
                 printUsage(argv[0]);
+                return 1;
+            }
+
+            if (rawprogram && !extract_path.has_value()) {
+                std::cerr << "Error: --rawprogram requires an output directory (-d)." << std::endl;
                 return 1;
             }
 
@@ -132,6 +164,7 @@ int main(int argc, char* argv[]) {
             }
 
             DzHeader dz_hdr(in_file, *dz_record_ptr, skip_verification, diag);
+            dz_hdr.detect_sector_size(file_path, sector_size_override);
             dz_hdr.print_info();
 
             // 2. If unpacking is requested, extract all embedded objects and their metadata.
@@ -150,6 +183,11 @@ int main(int argc, char* argv[]) {
 
                 // 3. Generate and store metadata.json
                 generate_metadata(*extract_path, kdz_header, sec_part, dz_hdr);
+
+                // 4. Optionally write the 9008/EDL (QFIL) flashing metadata.
+                if (rawprogram) {
+                    generate_rawprogram_files(*extract_path, dz_hdr, diag);
+                }
             
             } else {
                  // If not unpacked, only print detailed information

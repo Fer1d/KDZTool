@@ -86,17 +86,28 @@ This command parses a KDZ file and extracts its contents into a specified direct
 **Syntax:**
 
 ```
-./kdz-tool extract <kdz_file> [-d <path>] [--no-verify] [--strict]
+./kdz-tool extract <kdz_file> [-d <path>] [--no-verify] [--strict] [--rawprogram] [--sector-size <bytes>]
 ```
 
   - `<kdz_file>`: Path to the input KDZ firmware file.
   - `-d, --dest <path>`: The directory to extract files to.
   - `--no-verify`: (Optional) Skip the full DZ data hash verification for a faster initial parse. Useful for quick inspection.
   - `--strict`: (Optional) Treat consistency problems as hard errors again: checksum mismatches, unexpected field values, a `part_start_sector` that disagrees with the partition layout, and so on.
+  - `--rawprogram`: (Optional) Also write `rawprogram<N>.xml` and `patch<N>.xml` next to the partition images, so the folder can be flashed in 9008/EDL mode with QFIL. Requires `-d`.
+  - `--sector-size <bytes>`: (Optional) Override the detected sector size. Must be a power of two between 512 and 65536.
 
 #### Consistency warnings vs. real errors
 
 By default the parser only stops on structural damage - a truncated file, a wrong magic number, or a compression scheme the tool has no decompressor for. Everything that merely disagrees with a value the tool *derived* from the file (header CRC32, the MD5 of the chunk headers and of the data, the build weekday, fields that are only expected to be zero, `part_start_sector`) is reported as a warning instead of aborting the parse, and the value stored in the file always wins. All findings are listed in the `diagnostics` array of `metadata.json`, and `--strict` restores the old abort-on-first-mismatch behaviour.
+
+#### Building a 9008/EDL (QFIL) flash package
+
+With `--rawprogram` the extract command also writes Qualcomm compatible metadata next to the partition images:
+
+  - `rawprogram<N>.xml`: one `<program>` element per partition of physical partition `N`, pointing at `<N>.<partition>.img` with its start sector, sector count, size and `SECTOR_SIZE_IN_BYTES`.
+  - `patch<N>.xml`: entries that resize the partition which grows to fill the disk. Values that depend on the target capacity use the `NUM_DISK_SECTORS` placeholder, which QFIL substitutes while flashing. When no partition grows, the file only contains an empty `<patches>` element.
+
+The sector size is read from the GPT embedded in the firmware. When no GPT can be found the chunk size heuristic is used instead and a warning is recorded, and `--sector-size` overrides both. A complete QFIL flash also needs the matching firehose programmer (`prog_*.mbn`), which is not part of a KDZ file.
 
 **Example:**
 

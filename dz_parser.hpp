@@ -10,6 +10,7 @@
 #include "kdz_parser.hpp"
 #include "shared_structure.hpp"
 #include "diagnostics.hpp"
+#include "gpt.hpp"
 
 class DzHeader {
 public:
@@ -59,7 +60,14 @@ public:
     explicit DzHeader(std::ifstream& file, const KdzHeader::Record& dz_record,
                       bool skip_verification, Diagnostics& diag);
     void print_info() const;
+
+    // Sector size in bytes used by this DZ. It is detected from the GPT embedded
+    // in the firmware when possible and estimated from the chunk sizes otherwise.
+    // detect_sector_size() fills it in; until then the heuristic is used.
     uint64_t sector_size() const;
+    const std::string& sector_size_source() const { return sector_size_source_; }
+    const std::optional<GptInfo>& gpt_info() const { return gpt_info_; }
+    void detect_sector_size(const std::string& input_path, std::optional<uint32_t> override_size);
 
     // Warnings and consistency findings collected while parsing. They are also
     // written into metadata.json by the metadata generator.
@@ -67,8 +75,12 @@ public:
 
 private:
     void parse_part_headers(std::ifstream& file, bool verify_data_hash);
+    uint32_t heuristic_sector_size() const;
 
     Diagnostics& diag_;
+    uint32_t sector_size_value_ = 0;
+    std::string sector_size_source_ = "chunk size heuristic";
+    std::optional<GptInfo> gpt_info_;
 };
 
 #endif // DZ_PARSER_HPP

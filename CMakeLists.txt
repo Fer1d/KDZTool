@@ -37,9 +37,12 @@ add_executable(kdz-tool
     kdz_builder.cpp
     kdz_parser.cpp
     metadata_generator.cpp
+    rawprogram_generator.cpp
     secure_partition_builder.cpp
     secure_partition_parser.cpp
     common/utils.cpp
+    common/gpt.cpp
+    common/decompressor.cpp
     common/md5.cpp
 )
 

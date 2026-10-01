@@ -2,6 +2,7 @@
 #include "utils.hpp"
 #include "md5.hpp"
 #include "diagnostics.hpp"
+#include "decompressor.hpp"
 #include <iostream>
 #include <stdexcept>
 #include <zlib.h>
@@ -11,6 +12,7 @@
 #include <iomanip>
 #include <sstream>
 #include <algorithm>
+#include <cctype>
 #include <map>
 #include <utility>
 
@@ -344,6 +346,11 @@ void DzHeader::parse_part_headers(std::ifstream& file, bool verify_data_hash) {
 }
 
 uint64_t DzHeader::sector_size() const {
+    if (sector_size_value_ != 0) return sector_size_value_;
+    return heuristic_sector_size();
+}
+
+uint32_t DzHeader::heuristic_sector_size() const {
     size_t matches_512 = 0;
     size_t matches_4096 = 0;
 
@@ -359,8 +366,111 @@ uint64_t DzHeader::sector_size() const {
         }
     }
 
-    // Preserve the original behavior if the metadata is inconclusive.
+    if (matches_512 == matches_4096) {
+        // No usable evidence. UFS devices use 4096-byte logical blocks, eMMC
+        // devices use 512, which is a better guess than a fixed value.
+        return is_ufs ? 4096 : 512;
+    }
     return matches_512 > matches_4096 ? 512 : 4096;
+}
+
+void DzHeader::detect_sector_size(const std::string& input_path, std::optional<uint32_t> override_size) {
+    const uint32_t heuristic = heuristic_sector_size();
+
+    if (override_size.has_value()) {
+        sector_size_value_ = override_size.value();
+        sector_size_source_ = "command line option";
+        if (sector_size_value_ != heuristic) {
+            diag_.warn("sector size", "using the requested " + std::to_string(sector_size_value_) +
+                                          "-byte sectors; the chunk size heuristic suggests " +
+                                          std::to_string(heuristic));
+        }
+        return;
+    }
+
+    // The GPT normally lives in the very first sectors of the device, so chunks
+    // that start there are the best candidates; anything named after the GPT is
+    // tried as well. Both are read out of the compressed DZ, so the search is
+    // bounded and cheap.
+    struct Candidate {
+        const Chunk* chunk = nullptr;
+        uint32_t hw_partition = 0;
+        std::string partition_name;
+        bool named_gpt = false;
+    };
+
+    std::vector<Candidate> candidates;
+    for (const auto& hw_pair : parts) {
+        for (const auto& name_pair : hw_pair.second) {
+            for (const auto& chunk : name_pair.second) {
+                std::string haystack = name_pair.first + " " + chunk.name;
+                std::transform(haystack.begin(), haystack.end(), haystack.begin(),
+                               [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+
+                const bool named_gpt = haystack.find("gpt") != std::string::npos;
+                const bool at_disk_start = chunk.start_sector == 0 && chunk.part_start_sector == 0;
+                if (named_gpt || at_disk_start) {
+                    Candidate candidate;
+                    candidate.chunk = &chunk;
+                    candidate.hw_partition = hw_pair.first;
+                    candidate.partition_name = name_pair.first;
+                    candidate.named_gpt = named_gpt;
+                    candidates.push_back(candidate);
+                }
+            }
+        }
+    }
+    std::stable_sort(candidates.begin(), candidates.end(),
+                     [](const Candidate& a, const Candidate& b) { return a.named_gpt && !b.named_gpt; });
+
+    constexpr uint64_t PROBE_LIMIT = 512 * 1024;             // the largest possible GPT
+    constexpr uint32_t PROBE_INPUT_LIMIT = 16 * 1024 * 1024; // no GPT chunk is that big
+    constexpr std::size_t MAX_ATTEMPTS = 8;
+
+    std::size_t attempts = 0;
+    bool found = false;
+    for (std::size_t i = 0; i < candidates.size() && attempts < MAX_ATTEMPTS; ++i) {
+        const Candidate& candidate = candidates[i];
+        if (candidate.chunk->file_size == 0) continue;
+        if (candidate.chunk->file_size > PROBE_INPUT_LIMIT) continue;
+        ++attempts;
+
+        std::vector<char> buffer;
+        try {
+            buffer = decompress_chunk_to_memory(input_path, this->compression, candidate.chunk->file_offset,
+                                                candidate.chunk->file_size, candidate.chunk->data_size,
+                                                PROBE_LIMIT);
+        } catch (const std::exception&) {
+            continue;
+        }
+        if (buffer.empty()) continue;
+
+        GptInfo gpt;
+        if (!probe_gpt(buffer.data(), buffer.size(), gpt)) continue;
+
+        gpt.owner_hw_partition = candidate.hw_partition;
+        gpt.owner_partition_name = candidate.partition_name;
+        sector_size_value_ = gpt.sector_size;
+        sector_size_source_ = "GPT in partition \"" + candidate.partition_name + "\"";
+        gpt_info_ = gpt;
+        found = true;
+        break;
+    }
+
+    if (!found) {
+        sector_size_value_ = heuristic;
+        sector_size_source_ = std::string("chunk size heuristic") + (is_ufs ? " (UFS)" : " (eMMC)");
+        diag_.warn("sector size", "no valid GPT was found in the DZ archive, so the sector size is "
+                                  "estimated from the chunk sizes: " + std::to_string(sector_size_value_) +
+                                  " bytes");
+        return;
+    }
+
+    if (sector_size_value_ != heuristic) {
+        diag_.warn("sector size", "the GPT reports " + std::to_string(sector_size_value_) +
+                                      "-byte sectors while the chunk size heuristic suggests " +
+                                      std::to_string(heuristic) + "; using the GPT value");
+    }
 }
 
 void DzHeader::print_info() const {
@@ -405,7 +515,7 @@ void DzHeader::print_info() const {
     std::cout << "product_fuse_id = " << (int)this->product_fuse_id << std::endl;
     std::cout << "is_factory_image = " << (this->is_factory_image ? "true" : "false") << std::endl;
     std::cout << "is_ufs = " << (this->is_ufs ? "true" : "false") << std::endl;
-    std::cout << "sector_size = " << this->sector_size() << std::endl;
+    std::cout << "sector_size = " << this->sector_size() << " (" << this->sector_size_source_ << ")" << std::endl;
     std::cout << "chunk_hdrs_hash = " << bytes_to_hex(this->chunk_hdrs_hash) << std::endl;
     std::cout << "data_hash = " << bytes_to_hex(this->data_hash) << std::endl;
     std::cout << "header_crc = " << std::hex << this->header_crc << std::dec << std::endl;
