@@ -41,6 +41,8 @@ void printUsage(const char* progName) {
     std::cerr << "                         unexpected field values) instead of warning about them." << std::endl;
     std::cerr << "    --rawprogram         Also write rawprogram<N>.xml and patch<N>.xml for a 9008/EDL" << std::endl;
     std::cerr << "                         (QFIL) flash. Requires -d." << std::endl;
+    std::cerr << "    --keep-b             Extract the B slots of an A/B device as well instead of" << std::endl;
+    std::cerr << "                         flashing them from the A slot image (--rawprogram only)." << std::endl;
     std::cerr << "    --sector-size <n>    Override the detected sector size (power of two, 512..65536)." << std::endl << std::endl;
     std::cerr << "Options for 'repack':" << std::endl;
     std::cerr << "  " << progName << " repack <input_dir> <output_file>" << std::endl;
@@ -77,6 +79,7 @@ int main(int argc, char* argv[]) {
             bool skip_verification = false;
             bool strict = false;
             bool rawprogram = false;
+            bool keep_b = false;
             std::optional<uint32_t> sector_size_override;
 
             for (int i = 2; i < argc; ++i) {
@@ -87,6 +90,8 @@ int main(int argc, char* argv[]) {
                     strict = true;
                 } else if (arg == "--rawprogram") {
                     rawprogram = true;
+                } else if (arg == "--keep-b") {
+                    keep_b = true;
                 } else if (arg == "--sector-size") {
                     if (i + 1 < argc) {
                         try {
@@ -176,7 +181,7 @@ int main(int argc, char* argv[]) {
                 
                 // Use thread pool to unpack DZ partitions
                 std::cout << "Initializing thread pool with " << num_threads << " threads for extraction." << std::endl << std::endl;
-                extract_dz_parts(file_path, dz_hdr, *extract_path, pool, rawprogram);
+                extract_dz_parts(file_path, dz_hdr, *extract_path, pool, rawprogram, keep_b, diag);
 
                 // Unpacking V3's additional information
                 extract_additional_data(in_file, kdz_header, *extract_path);
@@ -186,7 +191,7 @@ int main(int argc, char* argv[]) {
 
                 // 4. Optionally write the 9008/EDL (QFIL) flashing metadata.
                 if (rawprogram) {
-                    generate_rawprogram_files(*extract_path, dz_hdr, diag);
+                    generate_rawprogram_files(*extract_path, dz_hdr, keep_b, diag);
                 }
             
             } else {

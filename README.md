@@ -203,7 +203,7 @@ This command parses a KDZ file and extracts its contents into a specified direct
 **Syntax:**
 
 ```
-./kdz-tool extract <kdz_file> [-d <path>] [--no-verify] [--strict] [--rawprogram] [--sector-size <bytes>]
+./kdz-tool extract <kdz_file> [-d <path>] [--no-verify] [--strict] [--rawprogram] [--keep-b] [--sector-size <bytes>]
 ```
 
   - `<kdz_file>`: Path to the input KDZ firmware file.
@@ -211,6 +211,7 @@ This command parses a KDZ file and extracts its contents into a specified direct
   - `--no-verify`: (Optional) Skip the full DZ data hash verification for a faster initial parse. Useful for quick inspection.
   - `--strict`: (Optional) Treat consistency problems as hard errors again: checksum mismatches, unexpected field values, a `part_start_sector` that disagrees with the partition layout, and so on.
   - `--rawprogram`: (Optional) Also write `rawprogram<N>.xml` and `patch<N>.xml` next to the partition images, so the folder can be flashed in 9008/EDL mode with QFIL. Requires `-d`.
+  - `--keep-b`: (Optional) With `--rawprogram`: extract the B slots of an A/B device as well, instead of flashing them from the image of the A slot.
   - `--sector-size <bytes>`: (Optional) Override the detected sector size. Must be a power of two between 512 and 65536.
 
 #### Consistency warnings vs. real errors
@@ -224,7 +225,8 @@ With `--rawprogram` the extract command also writes Qualcomm compatible metadata
   - `rawprogram<N>.xml`: one `<program>` element per run of data of physical partition `N` (LUN), with its start sector, sector count, size and `SECTOR_SIZE_IN_BYTES`.
   - A dense partition becomes one `<partition>.img`; a sparse one (userdata is the typical case - its data covers a few MiB of a 10 GiB partition) becomes one small file per chunk, named after the chunk. That is the layout LG's own packages use, and it keeps a 9008 package at the size of the data instead of the size of the partitions.
   - File names carry no index: LUN 0 is written without a prefix (`system_a.img`, `userdata_1.img_3702662`), the other LUNs get the letter the reference tools use (`B.` for LUN 1, `C.` for LUN 2, ...).
-  - Entries whose files would be byte-identical share one file, which is what LG does for the A and B slot (`boot_a` and `boot_b` point at the same `boot_a.img`).
+  - The B slot of an A/B device is not extracted at all: its entries flash the image of the A slot (`system_b` writes `system_a.img` at the position of `system_b`), which is what LG's own packages do. When the data the DZ stores for a B slot differs from its A slot the run says so, and `--keep-b` extracts the B slots normally instead.
+  - Whole-partition images that are still byte-identical after that are shared as well.
   - An entry that ends exactly at the end of the disk (the backup GPT) is placed with the `NUM_DISK_SECTORS` placeholder so that it follows the device when it offers more capacity; every other entry keeps fixed sectors.
   - `patch<N>.xml`: entries that resize the partition which grows to fill the disk. Values that depend on the target capacity use the `NUM_DISK_SECTORS` placeholder, which QFIL substitutes while flashing. When no partition grows, the file only contains an empty `<patches>` element.
 

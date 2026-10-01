@@ -93,4 +93,108 @@ inline PartitionLayout compute_partition_layout(const std::vector<DzHeader::Chun
     return layout;
 }
 
+// ---------------------------------------------------------------------------
+// A/B slots
+//
+// An A/B device stores both slots as separate partitions (X_a and X_b). Most of
+// them hold exactly the same bytes, and LG's own packages do not ship the image
+// twice: the B entry points at the image of the A slot. A 9008 package does the
+// same and does not extract the B partitions at all, unless --keep-b asks for a
+// complete extraction.
+// ---------------------------------------------------------------------------
+
+using DzParts = std::vector<std::pair<uint32_t, std::vector<std::pair<std::string, std::vector<DzHeader::Chunk>>>>>;
+
+// "system_b" -> "system_a"
+inline bool is_b_slot(const std::string& name, std::string& a_slot) {
+    if (name.size() < 3u) return false;
+    if (name.compare(name.size() - 2, 2, "_b") != 0) return false;
+    a_slot = name.substr(0, name.size() - 2) + "_a";
+    return true;
+}
+
+inline const std::vector<DzHeader::Chunk>* find_partition_chunks(const DzParts& parts, uint32_t lun,
+                                                                const std::string& name) {
+    for (std::size_t i = 0; i < parts.size(); ++i) {
+        if (parts[i].first != lun) continue;
+        for (std::size_t k = 0; k < parts[i].second.size(); ++k) {
+            if (parts[i].second[k].first == name) return &parts[i].second[k].second;
+        }
+    }
+    return nullptr;
+}
+
+inline uint64_t gpt_partition_sectors(const std::optional<GptInfo>& gpt, const std::string& name) {
+    if (!gpt.has_value()) return 0;
+    for (std::size_t i = 0; i < gpt->entries.size(); ++i) {
+        const GptPartitionEntry& entry = gpt->entries[i];
+        if (!entry.empty && entry.name == name && entry.end_lba >= entry.start_lba) {
+            return entry.end_lba - entry.start_lba + 1;
+        }
+    }
+    return 0;
+}
+
+// The chunk headers carry the MD5 of every chunk, so two partitions that are cut
+// the same way can be compared without reading a single byte of data. The A and B
+// slot live at different places on the device, so the offsets are compared
+// relative to the start of their own partition.
+inline bool same_chunk_signature(const std::vector<DzHeader::Chunk>& a,
+                                 const std::vector<DzHeader::Chunk>& b) {
+    if (a.size() != b.size() || a.empty()) return false;
+    const uint64_t a_base = a.front().part_start_sector;
+    const uint64_t b_base = b.front().part_start_sector;
+    for (std::size_t i = 0; i < a.size(); ++i) {
+        if ((uint64_t)a[i].start_sector - a_base != (uint64_t)b[i].start_sector - b_base) return false;
+        if (a[i].data_size != b[i].data_size) return false;
+        if (a[i].hash != b[i].hash) return false;
+    }
+    return true;
+}
+
+// The same layout, moved to another partition: the files stay the ones of the A
+// slot, only the sector the data lands on changes.
+inline PartitionLayout mirror_layout(const PartitionLayout& source, uint64_t new_base) {
+    PartitionLayout layout = source;
+    for (std::size_t i = 0; i < layout.runs.size(); ++i) {
+        layout.runs[i].start_sector = new_base + (layout.runs[i].start_sector - source.base_sector);
+    }
+    layout.base_sector = new_base;
+    return layout;
+}
+
+struct SlotDecision {
+    bool reuse_a = false;          // flash this partition from the A slot image
+    bool identical = true;         // the data the DZ stores for it matches the A slot
+    std::string a_name;            // the A partition the data comes from
+    PartitionLayout layout;        // layout to describe it with (A files, B position)
+};
+
+inline SlotDecision decide_slot(const DzParts& parts, uint32_t lun, const std::string& name,
+                                uint32_t sector_size, bool flash_layout, bool keep_b,
+                                const std::optional<GptInfo>& gpt) {
+    SlotDecision decision;
+    if (!flash_layout || keep_b) return decision;
+
+    std::string a_name;
+    if (!is_b_slot(name, a_name)) return decision;
+
+    const std::vector<DzHeader::Chunk>* a_chunks = find_partition_chunks(parts, lun, a_name);
+    const std::vector<DzHeader::Chunk>* b_chunks = find_partition_chunks(parts, lun, name);
+    if (a_chunks == nullptr || b_chunks == nullptr || a_chunks->empty() || b_chunks->empty()) return decision;
+
+    const PartitionLayout a_layout = compute_partition_layout(*a_chunks, sector_size, lun, a_name);
+    if (a_layout.runs.empty() || a_layout.total_sectors == 0) return decision;
+
+    // Flashing the A image into the B slot must not run past the B partition.
+    const uint64_t b_sectors = gpt_partition_sectors(gpt, name);
+    if (b_sectors != 0 && b_sectors < a_layout.total_sectors) return decision;
+
+    decision.reuse_a = true;
+    decision.a_name = a_name;
+    decision.layout = mirror_layout(a_layout, b_chunks->front().part_start_sector);
+    decision.identical = same_chunk_signature(*a_chunks, *b_chunks);
+    return decision;
+}
+
 #endif // PARTITION_LAYOUT_HPP

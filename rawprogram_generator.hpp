@@ -11,6 +11,9 @@
 // the partition image the extractor wrote: "<hw_partition>.<name>.img".
 // The patch files only carry entries when the GPT describes a partition that
 // still grows to fill the disk.
-void generate_rawprogram_files(const std::string& out_dir, const DzHeader& dz_hdr, Diagnostics& diag);
+// keep_b extracts the B slots of an A/B device instead of flashing them from the
+// image of the A slot.
+void generate_rawprogram_files(const std::string& out_dir, const DzHeader& dz_hdr, bool keep_b,
+                               Diagnostics& diag);
 
 #endif // RAWPROGRAM_GENERATOR_HPP

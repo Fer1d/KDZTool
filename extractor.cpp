@@ -144,7 +144,7 @@ void decompress_and_write_chunk(
 
 // Writing task will be directly dispatched to the ThreadPool.
 void extract_dz_parts(const std::string& in_path, const DzHeader& dz_hdr, const std::string& out_path,
-                      ThreadPool& pool, bool flash_layout) {
+                      ThreadPool& pool, bool flash_layout, bool keep_b, Diagnostics& diag) {
     const uint64_t sector_size = dz_hdr.sector_size();
     std::cout << "Using " << sector_size << "-byte DZ sectors." << std::endl << std::endl;
 
@@ -157,6 +157,19 @@ void extract_dz_parts(const std::string& in_path, const DzHeader& dz_hdr, const 
             const std::string& pname = pname_pair.first;
             const auto& chunks = pname_pair.second;
             if (chunks.empty()) continue;
+
+            // The B slot of an A/B device is flashed from the image of the A slot,
+            // so nothing has to be extracted for it.
+            const SlotDecision slot = decide_slot(dz_hdr.parts, hw_part, pname,
+                                                  static_cast<uint32_t>(sector_size), flash_layout, keep_b,
+                                                  dz_hdr.gpt_info());
+            if (slot.reuse_a) {
+                std::cout << "  part " << pname << ": not extracted, it is flashed from "
+                          << slot.layout.runs.front().file_name << " (" << slot.a_name << ")"
+                          << (slot.identical ? "" : ", although the data the DZ stores for it differs")
+                          << std::endl;
+                continue;
+            }
 
             const PartitionLayout layout =
                 compute_partition_layout(chunks, static_cast<uint32_t>(sector_size), hw_part, pname);

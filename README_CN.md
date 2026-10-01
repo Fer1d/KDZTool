@@ -208,7 +208,7 @@ General Options:
 **语法：**
 
 ```
-./kdz-tool extract <kdz_file> [-d <path>] [--no-verify] [--strict] [--rawprogram] [--sector-size <bytes>]
+./kdz-tool extract <kdz_file> [-d <path>] [--no-verify] [--strict] [--rawprogram] [--keep-b] [--sector-size <bytes>]
 ```
 
   - `<kdz_file>`：输入 KDZ 固件路径。
@@ -216,6 +216,7 @@ General Options:
   - `--no-verify`：（可选）跳过 DZ 数据的完整哈希校验，启动更快，适合只看信息。
   - `--strict`：（可选）把"一致性差异"重新当作致命错误：校验和不匹配、字段取值异常、`part_start_sector` 与分区布局不符等。
   - `--rawprogram`：（可选）在分区镜像旁额外生成 `rawprogram<N>.xml` 与 `patch<N>.xml`，使该目录可直接用于 9008/EDL（QFIL）刷机。必须配合 `-d`。
+  - `--keep-b`：（可选）配合 `--rawprogram`：改为正常提取 A/B 设备的 B 槽，而不是用 A 槽的镜像刷入。
   - `--sector-size <bytes>`：（可选）覆盖自动探测出的扇区大小，必须是 512 到 65536 之间的 2 的幂。
 
 #### 一致性警告与真正的错误
@@ -229,7 +230,8 @@ General Options:
   - `rawprogram<N>.xml`：物理分区 `N`（LUN）的每一段数据一条 `<program>`，带上起始扇区、扇区数、大小和 `SECTOR_SIZE_IN_BYTES`。
   - 数据密集的分区输出成一个 `<分区名>.img`；稀疏分区（典型是 userdata —— 10 GiB 的分区里只有几 MiB 数据）按数据块拆成若干小文件，文件名就用数据块名。这正是 LG 自己那套包的布局，能让 9008 包的体积等于**数据量**而不是分区大小。
   - 文件名不再带序号前缀：LUN 0 不加前缀（`system_a.img`、`userdata_1.img_3702662`），其余 LUN 用参考工具那套字母前缀（LUN 1 是 `B.`、LUN 2 是 `C.` …）。
-  - 内容逐字节相同的条目共用一个文件，这也正是 LG 对 A/B 槽的做法（`boot_a` 与 `boot_b` 指向同一个 `boot_a.img`）。
+  - A/B 设备的 B 槽**完全不提取**：它的条目直接刷 A 槽的镜像（`system_b` 写 `system_a.img` 到 B 槽的位置），LG 自己的包就是这么做的。若 DZ 里 B 槽的数据与 A 槽不同，运行时会明确提示；加 `--keep-b` 则改为正常提取 B 槽。
+  - 其余整分区镜像若内容逐字节相同，也共用一个文件。
   - 末端正好落在磁盘末尾的条目（备份 GPT）用 `NUM_DISK_SECTORS` 占位符定位，目标容量更大时会跟着移动；其余条目仍写固定扇区号。
   - `patch<N>.xml`：用于把"填充剩余容量"的那个分区扩到实际磁盘大小。与目标容量相关的值使用 `NUM_DISK_SECTORS` 占位符，由 QFIL 在刷机时代换。若固件里没有可增长的分区，该文件只包含一个空的 `<patches>`。
 

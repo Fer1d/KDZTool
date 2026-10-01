@@ -42,6 +42,7 @@ struct PatchEntry {
 struct PartitionInfo {
     uint32_t lun = 0;
     std::string name;
+    bool mirrored = false;   // flashed from the image of its A slot
     PartitionLayout layout;
 };
 
@@ -79,7 +80,8 @@ uint64_t size_in_kb(uint64_t sectors, uint32_t sector_size) {
     return (sectors * sector_size) / 1024;
 }
 
-std::vector<PartitionInfo> collect_partitions(const DzHeader& dz_hdr, uint32_t sector_size) {
+std::vector<PartitionInfo> collect_partitions(const DzHeader& dz_hdr, uint32_t sector_size, bool keep_b,
+                                            Diagnostics& diag) {
     std::vector<PartitionInfo> partitions;
     for (const auto& hw_pair : dz_hdr.parts) {
         for (const auto& name_pair : hw_pair.second) {
@@ -88,6 +90,20 @@ std::vector<PartitionInfo> collect_partitions(const DzHeader& dz_hdr, uint32_t s
             info.lun = hw_pair.first;
             info.name = name_pair.first;
             info.layout = compute_partition_layout(name_pair.second, sector_size, info.lun, info.name);
+
+            // A B slot is not extracted; its entries point at the image of the A slot.
+            const SlotDecision slot = decide_slot(dz_hdr.parts, info.lun, info.name, sector_size, true,
+                                                  keep_b, dz_hdr.gpt_info());
+            if (slot.reuse_a) {
+                info.mirrored = true;
+                info.layout = slot.layout;
+                if (!slot.identical) {
+                    diag.warn("b-slot", "the B slot partition '" + info.name + "' is flashed from " +
+                                            slot.layout.runs.front().file_name +
+                                            " although the data the DZ stores for it differs from '" +
+                                            slot.a_name + "'");
+                }
+            }
             partitions.push_back(info);
         }
     }
@@ -347,14 +363,15 @@ std::vector<PatchEntry> build_patches(const DzHeader& dz_hdr,
 
 } // namespace
 
-void generate_rawprogram_files(const std::string& out_dir, const DzHeader& dz_hdr, Diagnostics& diag) {
+void generate_rawprogram_files(const std::string& out_dir, const DzHeader& dz_hdr, bool keep_b,
+                               Diagnostics& diag) {
     const uint32_t sector_size = static_cast<uint32_t>(dz_hdr.sector_size());
     if (sector_size == 0) {
         diag.warn("rawprogram", "the sector size is unknown, so no rawprogram files were generated");
         return;
     }
 
-    const std::vector<PartitionInfo> partitions = collect_partitions(dz_hdr, sector_size);
+    const std::vector<PartitionInfo> partitions = collect_partitions(dz_hdr, sector_size, keep_b, diag);
     if (partitions.empty()) {
         diag.warn("rawprogram", "the DZ archive contains no partitions to describe");
         return;
@@ -397,6 +414,9 @@ void generate_rawprogram_files(const std::string& out_dir, const DzHeader& dz_hd
     // are compared, which keeps the hashing cheap.
     std::map<uint64_t, std::vector<std::size_t>> by_size;
     for (std::size_t i = 0; i < entries.size(); ++i) {
+        // Only whole partition images are shared; a chunk file keeps its own name so
+        // that an entry always names the chunk it came from.
+        if (entries[i].file != partition_image_name(entries[i].hw_partition, entries[i].label)) continue;
         std::error_code ec;
         const uint64_t size = fs::file_size(fs::path(out_dir) / entries[i].file, ec);
         if (ec) continue;
