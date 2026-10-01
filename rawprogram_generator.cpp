@@ -215,8 +215,20 @@ std::vector<PatchEntry> build_patches(const DzHeader& dz_hdr,
         return patches;
     }
 
-    const uint32_t entry_sectors = gpt.backup_sectors() - 1;
-    const std::string last_usable = "NUM_DISK_SECTORS-" + std::to_string(gpt.backup_sectors() + 1);
+    // The GPT states where the disk ends (the backup header sits in the last
+    // sector) and where the last usable sector is; the difference is the area the
+    // firmware reserves at the end for the backup GPT. Written relative to
+    // NUM_DISK_SECTORS the patch stays correct on a device with more capacity.
+    if (gpt.alt_lba == 0 || gpt.last_usable_lba >= gpt.alt_lba + 1) {
+        diag.warn("patch", "the GPT does not describe the end of the disk, so no patch entries were generated");
+        return patches;
+    }
+    const uint64_t tail_reserved = gpt.alt_lba + 1 - gpt.last_usable_lba;
+    if (tail_reserved < 2) {
+        diag.warn("patch", "the GPT leaves no room for a backup table, so no patch entries were generated");
+        return patches;
+    }
+    const std::string last_usable = "NUM_DISK_SECTORS-" + std::to_string(tail_reserved);
 
     auto add_patch = [&patches, &gpt](const PartitionImage& image, uint64_t byte_in_image,
                                       uint32_t size_in_bytes, const std::string& value,
@@ -244,16 +256,21 @@ std::vector<PatchEntry> build_patches(const DzHeader& dz_hdr,
               "Update the last partition '" + grow_name + "' with its actual size in the primary GPT");
 
     const PartitionImage* backup = find_backup_image(images, gpt);
-    if (backup != nullptr && backup->total_sectors > entry_sectors) {
+    if (backup != nullptr) {
+        // The backup header is the last sector of its partition image and the
+        // entry array starts right after the last usable sector.
         const uint64_t header_byte = (backup->total_sectors - 1) * gpt.sector_size;
-        const uint64_t entries_byte = (backup->total_sectors - 1 - entry_sectors) * gpt.sector_size;
+        const uint64_t entries_lba = gpt.last_usable_lba + 1;
+        const uint64_t entries_byte = (entries_lba >= backup->base_sector)
+                                          ? (entries_lba - backup->base_sector) * gpt.sector_size
+                                          : 0;
 
         add_patch(*backup, header_byte + 24, 8, "NUM_DISK_SECTORS-1",
                   "Update MyLBA in the backup GPT header");
         add_patch(*backup, header_byte + 48, 8, last_usable,
                   "Update LastUsableLBA in the backup GPT header");
         add_patch(*backup, header_byte + 72, 8,
-                  "NUM_DISK_SECTORS-" + std::to_string(entry_sectors + 1),
+                  "NUM_DISK_SECTORS-" + std::to_string(tail_reserved - 1),
                   "Update PartitionEntryLBA in the backup GPT header");
         add_patch(*backup, entries_byte + grow_index * gpt.entry_size + 40, 8, last_usable,
                   "Update the last partition '" + grow_name + "' with its actual size in the backup GPT");

@@ -1,0 +1,7 @@
+# Firmware samples and extraction output must never be committed
+*.kdz
+*.dz
+*.img
+*.bin
+out/
+dzextracted/

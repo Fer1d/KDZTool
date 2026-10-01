@@ -113,14 +113,38 @@ bool parse_header(const char* header, std::size_t available, uint32_t shift,
     return true;
 }
 
-} // namespace
+// Locates the partition entry array inside an image. The header stores the
+// absolute LBA of the array, so its position inside a partition image follows
+// from the sector the image starts at. An image that does not start at LBA 0 (a
+// backup GPT handed over on its own) is handled by measuring backwards from the
+// header, which is where the UEFI layout puts the array.
+bool fill_entries(const char* data, std::size_t size, uint64_t base_sector,
+                  std::size_t header_off, GptInfo& info) {
+    const std::size_t sector = static_cast<std::size_t>(1) << info.shift;
+    const uint64_t entry_bytes = static_cast<uint64_t>(info.entry_count) * info.entry_size;
 
-uint32_t GptInfo::backup_sectors() const {
-    if (sector_size == 0 || entry_size == 0) return 0;
-    const uint64_t entry_bytes = static_cast<uint64_t>(entry_count) * entry_size;
-    const uint64_t entry_sectors = (entry_bytes + sector_size - 1) / sector_size;
-    return static_cast<uint32_t>(entry_sectors + 1);
+    if (info.entry_lba >= base_sector) {
+        const uint64_t relative = (info.entry_lba - base_sector) << info.shift;
+        if (relative + entry_bytes <= size &&
+            parse_entries(data, size, static_cast<std::size_t>(relative),
+                          info.entry_count, info.entry_size, info)) {
+            return true;
+        }
+    }
+
+    if (info.my_lba > info.entry_lba) {
+        const uint64_t backwards = (info.my_lba - info.entry_lba) * sector;
+        if (backwards <= header_off &&
+            parse_entries(data, size, header_off - static_cast<std::size_t>(backwards),
+                          info.entry_count, info.entry_size, info)) {
+            return true;
+        }
+    }
+
+    return false;
 }
+
+} // namespace
 
 bool GptInfo::find_grow_entry(std::size_t& index) const {
     std::size_t i = entries.size();
@@ -137,7 +161,7 @@ bool GptInfo::find_grow_entry(std::size_t& index) const {
     return false;
 }
 
-bool probe_gpt(const char* data, std::size_t size, GptInfo& out) {
+bool probe_gpt(const char* data, std::size_t size, uint64_t base_sector, GptInfo& out) {
     if (data == nullptr || size < 1024) return false;
 
     uint32_t shift = GPT_MIN_SHIFT;
@@ -145,35 +169,25 @@ bool probe_gpt(const char* data, std::size_t size, GptInfo& out) {
         const std::size_t sector = static_cast<std::size_t>(1) << shift;
         GptInfo candidate;
 
-        if (size >= sector + GPT_HEADER_MIN_SIZE &&
-            parse_header(data + sector, size - sector, shift, false, candidate)) {
-            const uint64_t entry_bytes = static_cast<uint64_t>(candidate.entry_count) * candidate.entry_size;
-            const uint64_t entry_offset = candidate.entry_lba << shift;
-            if (entry_offset + entry_bytes <= size &&
-                parse_entries(data, size, static_cast<std::size_t>(entry_offset),
-                              candidate.entry_count, candidate.entry_size, candidate)) {
+        // Primary GPT: the header is the second sector of the device.
+        if (base_sector <= 1) {
+            const std::size_t header_off = static_cast<std::size_t>(1 - base_sector) << shift;
+            if (header_off + GPT_HEADER_MIN_SIZE <= size &&
+                parse_header(data + header_off, size - header_off, shift, false, candidate)) {
+                fill_entries(data, size, base_sector, header_off, candidate);
                 out = candidate;
                 return true;
             }
-            out = candidate;
-            return true;
         }
 
-        if (size >= 2 * sector &&
-            parse_header(data + size - sector, sector, shift, true, candidate)) {
-            const uint64_t entry_bytes = static_cast<uint64_t>(candidate.entry_count) * candidate.entry_size;
-            const uint64_t entry_sectors = (entry_bytes + sector - 1) / sector;
-            if (static_cast<uint64_t>(entry_sectors) * sector <= size - sector) {
-                const std::size_t entry_offset =
-                    size - sector - static_cast<std::size_t>(entry_sectors) * sector;
-                if (parse_entries(data, size, entry_offset, candidate.entry_count,
-                                  candidate.entry_size, candidate)) {
-                    out = candidate;
-                    return true;
-                }
+        // Backup GPT: the header is the last sector of the partition image.
+        if (size >= 2 * sector) {
+            const std::size_t header_off = size - sector;
+            if (parse_header(data + header_off, sector, shift, true, candidate)) {
+                fill_entries(data, size, base_sector, header_off, candidate);
+                out = candidate;
+                return true;
             }
-            out = candidate;
-            return true;
         }
         ++shift;
     }

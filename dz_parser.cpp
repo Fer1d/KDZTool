@@ -260,32 +260,21 @@ void DzHeader::parse_part_headers(std::ifstream& file, bool verify_data_hash) {
             chunk.is_ubi_image = (chunk_hdr.is_ubi_image != 0);
             chunk.file_offset = file.tellg();
 
-            // part_start_sector is a constant of the logical partition that every
-            // chunk header repeats: the first sector of the whole partition, which
-            // is used as the base offset when the partition image is rebuilt. The
-            // value stored in the header therefore wins; we only derive one when
-            // the header leaves the field at zero, and disagreement between the
-            // chunks of a partition is reported instead of aborting the parse.
+            // The chunk header carries the base sector the partition image is built
+            // from. Real firmware either repeats the partition base in every chunk
+            // or stores each chunk's own start sector, so the stored value is used
+            // as-is and only a missing one is derived.
             const PartKey part_key = std::make_pair(hw_partition, part_name_str);
             auto base_it = part_bases.find(part_key);
             if (base_it == part_bases.end()) {
-                uint32_t base = chunk.start_sector;
-                if (chunk_hdr.part_start_sector != 0) {
-                    base = chunk_hdr.part_start_sector;
-                } else {
+                base_it = part_bases.emplace(part_key, chunk.start_sector).first;
+                if (chunk_hdr.part_start_sector == 0 && chunk.start_sector != 0) {
                     diag_.info("DZ partition " + part_name_str,
                                "part_start_sector is not set in the chunk header, using the first chunk "
                                "start sector " + std::to_string(chunk.start_sector) + " as the partition base");
                 }
-                base_it = part_bases.emplace(part_key, base).first;
-            } else if (chunk_hdr.part_start_sector != 0 &&
-                       chunk_hdr.part_start_sector != base_it->second) {
-                diag_.inconsistent("DZ partition " + part_name_str, "part_start_sector",
-                                   std::to_string(chunk_hdr.part_start_sector),
-                                   std::to_string(base_it->second));
             }
 
-            // A zero field means "value not stored"; fall back to the derived base.
             chunk.part_start_sector = (chunk_hdr.part_start_sector != 0)
                                           ? chunk_hdr.part_start_sector
                                           : base_it->second;
@@ -324,6 +313,33 @@ void DzHeader::parse_part_headers(std::ifstream& file, bool verify_data_hash) {
             }
         } else {
             file.seekg(chunk.file_size, std::ios_base::cur);
+        }
+    }
+
+    // Cross-check the base sector each image is built from: the extractor uses the
+    // first chunk's part_start_sector, so it should be the partition's lowest
+    // sector. A base below it means a hole at the start of the image (LG writes
+    // those), a base above it would misalign every chunk of the partition.
+    for (const auto& hw_pair : parts) {
+        for (const auto& name_pair : hw_pair.second) {
+            const std::vector<Chunk>& chunks = name_pair.second;
+            if (chunks.empty()) continue;
+
+            const uint64_t base = chunks.front().part_start_sector;
+            uint64_t lowest = chunks.front().start_sector;
+            for (std::size_t i = 1; i < chunks.size(); ++i) {
+                if (chunks[i].start_sector < lowest) lowest = chunks[i].start_sector;
+            }
+
+            if (base < lowest) {
+                diag_.info("DZ partition " + name_pair.first,
+                           "the image starts with a hole of " + std::to_string(lowest - base) +
+                           " sectors before the first chunk");
+            } else if (base > lowest) {
+                diag_.warn("DZ partition " + name_pair.first,
+                           "part_start_sector " + std::to_string(base) + " is above the first chunk start " +
+                           std::to_string(lowest) + ", so the extracted image would be misaligned");
+            }
         }
     }
 
@@ -446,7 +462,7 @@ void DzHeader::detect_sector_size(const std::string& input_path, std::optional<u
         if (buffer.empty()) continue;
 
         GptInfo gpt;
-        if (!probe_gpt(buffer.data(), buffer.size(), gpt)) continue;
+        if (!probe_gpt(buffer.data(), buffer.size(), candidate.chunk->start_sector, gpt)) continue;
 
         gpt.owner_hw_partition = candidate.hw_partition;
         gpt.owner_partition_name = candidate.partition_name;
