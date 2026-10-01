@@ -113,7 +113,8 @@ std::vector<PartitionImage> collect_partition_images(const DzHeader& dz_hdr, Dia
 }
 
 void write_rawprogram(const fs::path& path, uint32_t hw_partition,
-                      const std::vector<PartitionImage>& images, uint32_t sector_size) {
+                      const std::vector<PartitionImage>& images, uint32_t sector_size,
+                      uint64_t disk_sectors) {
     std::ofstream out(path, std::ios::binary);
     if (!out) throw std::runtime_error("failed to open " + path.string());
 
@@ -121,6 +122,26 @@ void write_rawprogram(const fs::path& path, uint32_t hw_partition,
     out << "<data>\n";
     for (std::size_t i = 0; i < images.size(); ++i) {
         const PartitionImage& image = images[i];
+
+        // A partition that ends exactly at the end of the disk has to move when the
+        // device offers more capacity - that is what the "grow" partition is for - so
+        // its position is written relative to NUM_DISK_SECTORS. On a device that
+        // matches the firmware the expression evaluates to the same value a literal
+        // would have, exactly like Qualcomm's own rawprogram templates.
+        const bool at_disk_end = disk_sectors != 0 &&
+                                 image.base_sector + image.total_sectors == disk_sectors;
+
+        std::string start_sector;
+        std::string start_byte_hex;
+        if (at_disk_end) {
+            start_sector = "NUM_DISK_SECTORS-" + std::to_string(image.total_sectors);
+            start_byte_hex = "(" + std::to_string(sector_size) + "*NUM_DISK_SECTORS)-" +
+                             std::to_string(image.total_sectors * sector_size);
+        } else {
+            start_sector = std::to_string(image.base_sector);
+            start_byte_hex = hex_value(image.base_sector * sector_size);
+        }
+
         out << "\t<program"
             << " SECTOR_SIZE_IN_BYTES=\"" << sector_size << "\""
             << " file_sector_offset=\"0\""
@@ -130,8 +151,8 @@ void write_rawprogram(const fs::path& path, uint32_t hw_partition,
             << " physical_partition_number=\"" << hw_partition << "\""
             << " size_in_KB=\"" << size_in_kb(image.total_sectors, sector_size) << "\""
             << " sparse=\"" << (image.sparse ? "true" : "false") << "\""
-            << " start_byte_hex=\"" << hex_value(image.base_sector * sector_size) << "\""
-            << " start_sector=\"" << image.base_sector << "\""
+            << " start_byte_hex=\"" << start_byte_hex << "\""
+            << " start_sector=\"" << start_sector << "\""
             << " />\n";
     }
     out << "</data>\n";
@@ -308,6 +329,8 @@ void generate_rawprogram_files(const std::string& out_dir, const DzHeader& dz_hd
 
     const std::vector<PatchEntry> patches = build_patches(dz_hdr, images, diag);
     const uint32_t patch_lun = dz_hdr.gpt_info().has_value() ? dz_hdr.gpt_info()->owner_hw_partition : 0;
+    const uint64_t disk_sectors =
+        dz_hdr.gpt_info().has_value() ? dz_hdr.gpt_info()->alt_lba + 1 : 0;
 
     std::cout << "Generating 9008/EDL flashing metadata..." << std::endl;
     for (std::size_t i = 0; i < luns.size(); ++i) {
@@ -322,7 +345,17 @@ void generate_rawprogram_files(const std::string& out_dir, const DzHeader& dz_hd
         const fs::path patch_path = fs::path(out_dir) / ("patch" + std::to_string(lun) + ".xml");
 
         try {
-            write_rawprogram(raw_path, lun, lun_images, sector_size);
+            if (disk_sectors != 0) {
+                for (std::size_t k = 0; k < lun_images.size(); ++k) {
+                    if (lun_images[k].base_sector + lun_images[k].total_sectors == disk_sectors) {
+                        diag.info("rawprogram", "placing " + lun_images[k].filename +
+                                                    " relative to the end of the disk (NUM_DISK_SECTORS-" +
+                                                    std::to_string(lun_images[k].total_sectors) + ")");
+                    }
+                }
+            }
+
+            write_rawprogram(raw_path, lun, lun_images, sector_size, disk_sectors);
             std::cout << "  " << raw_path.filename().string() << ": "
                       << lun_images.size() << " program entries" << std::endl;
 

@@ -39,6 +39,7 @@ struct GptInfo {
 // base_sector tells the function which LBA the image starts at so that the
 // partition entry array can be located. On success the header is validated
 // (magic, header CRC32, revision, entry size) and true is returned.
-bool probe_gpt(const char* data, std::size_t size, uint64_t base_sector, GptInfo& out);
+bool probe_gpt(const char* data, std::size_t size, uint64_t base_sector,
+               const std::vector<uint32_t>& sector_sizes, GptInfo& out);
 
 #endif // GPT_HPP

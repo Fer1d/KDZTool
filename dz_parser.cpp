@@ -439,6 +439,13 @@ void DzHeader::detect_sector_size(const std::string& input_path, std::optional<u
     std::stable_sort(candidates.begin(), candidates.end(),
                      [](const Candidate& a, const Candidate& b) { return a.named_gpt && !b.named_gpt; });
 
+    // LG devices use either 512-byte (eMMC) or 4096-byte (UFS) logical blocks. The
+    // header tells us which one to expect, so that value is probed first; anything
+    // else has to be forced with --sector-size.
+    std::vector<uint32_t> probe_sizes;
+    probe_sizes.push_back(is_ufs ? 4096u : 512u);
+    probe_sizes.push_back(is_ufs ? 512u : 4096u);
+
     constexpr uint64_t PROBE_LIMIT = 512 * 1024;             // the largest possible GPT
     constexpr uint32_t PROBE_INPUT_LIMIT = 16 * 1024 * 1024; // no GPT chunk is that big
     constexpr std::size_t MAX_ATTEMPTS = 8;
@@ -462,7 +469,7 @@ void DzHeader::detect_sector_size(const std::string& input_path, std::optional<u
         if (buffer.empty()) continue;
 
         GptInfo gpt;
-        if (!probe_gpt(buffer.data(), buffer.size(), candidate.chunk->start_sector, gpt)) continue;
+        if (!probe_gpt(buffer.data(), buffer.size(), candidate.chunk->start_sector, probe_sizes, gpt)) continue;
 
         gpt.owner_hw_partition = candidate.hw_partition;
         gpt.owner_partition_name = candidate.partition_name;
@@ -486,6 +493,15 @@ void DzHeader::detect_sector_size(const std::string& input_path, std::optional<u
         diag_.warn("sector size", "the GPT reports " + std::to_string(sector_size_value_) +
                                       "-byte sectors while the chunk size heuristic suggests " +
                                       std::to_string(heuristic) + "; using the GPT value");
+    }
+
+    // The DZ header says whether the device uses UFS or eMMC storage; a contradicting
+    // GPT is worth reporting even though the GPT is the stronger evidence.
+    const uint32_t expected = is_ufs ? 4096u : 512u;
+    if (sector_size_value_ != expected) {
+        diag_.warn("sector size", "the GPT reports " + std::to_string(sector_size_value_) +
+                                      "-byte sectors but the DZ header marks the device as " +
+                                      (is_ufs ? "UFS (4096)" : "eMMC (512)") + "; using the GPT value");
     }
 }
 

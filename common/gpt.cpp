@@ -7,8 +7,6 @@
 namespace {
 
 constexpr std::size_t GPT_HEADER_MIN_SIZE = 92;
-constexpr uint32_t GPT_MIN_SHIFT = 9;
-constexpr uint32_t GPT_MAX_SHIFT = 16;
 
 uint32_t read_u32(const char* p) {
     const unsigned char* b = reinterpret_cast<const unsigned char*>(p);
@@ -161,11 +159,18 @@ bool GptInfo::find_grow_entry(std::size_t& index) const {
     return false;
 }
 
-bool probe_gpt(const char* data, std::size_t size, uint64_t base_sector, GptInfo& out) {
+bool probe_gpt(const char* data, std::size_t size, uint64_t base_sector,
+               const std::vector<uint32_t>& sector_sizes, GptInfo& out) {
     if (data == nullptr || size < 1024) return false;
 
-    uint32_t shift = GPT_MIN_SHIFT;
-    while (shift <= GPT_MAX_SHIFT) {
+    for (std::size_t candidate_index = 0; candidate_index < sector_sizes.size(); ++candidate_index) {
+        const uint32_t candidate_size = sector_sizes[candidate_index];
+        if (candidate_size < 512 || candidate_size > 65536) continue;
+        if ((candidate_size & (candidate_size - 1)) != 0) continue;
+
+        uint32_t shift = 0;
+        while ((1u << shift) < candidate_size) ++shift;
+
         const std::size_t sector = static_cast<std::size_t>(1) << shift;
         GptInfo candidate;
 
@@ -189,7 +194,6 @@ bool probe_gpt(const char* data, std::size_t size, uint64_t base_sector, GptInfo
                 return true;
             }
         }
-        ++shift;
     }
     return false;
 }
