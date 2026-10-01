@@ -186,13 +186,15 @@ int main(int argc, char* argv[]) {
                 // Unpacking V3's additional information
                 extract_additional_data(in_file, kdz_header, *extract_path);
 
-                // 3. Generate and store metadata.json
-                generate_metadata(*extract_path, kdz_header, sec_part, dz_hdr);
-
-                // 4. Optionally write the 9008/EDL (QFIL) flashing metadata.
+                // 3. Optionally write the 9008/EDL (QFIL) flashing metadata. This
+                //    runs before metadata.json so that its findings end up in the
+                //    diagnostics list as well.
                 if (rawprogram) {
                     generate_rawprogram_files(*extract_path, dz_hdr, keep_b, diag);
                 }
+
+                // 4. Generate and store metadata.json
+                generate_metadata(*extract_path, kdz_header, sec_part, dz_hdr);
             
             } else {
                  // If not unpacked, only print detailed information
