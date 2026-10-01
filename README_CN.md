@@ -1,0 +1,360 @@
+# LG KDZ 固件工具
+
+**中文** | [English](README.md)
+
+一个高性能、跨平台的命令行工具，用于解包（extract）和重新打包（repack）LG 官方固件（`.kdz`）。本工具用现代 C++ 编写，面向需要检查或修改 LG 设备固件的进阶用户、开发者和研究人员。
+
+## 概览
+
+LG 的官方固件使用一种名为 KDZ 的私有容器格式分发。KDZ 文件内部，核心系统镜像装在 `.dz` 归档里，而 `.dz` 本身又是压缩分区数据块（chunk）的容器。本工具提供完整方案：把这些文件拆解成基础组件，并且可以把它们重新组装回一个可以刷入设备的合法 KDZ 文件。
+
+工具使用多线程加速压缩/解压缩这类计算密集的操作，显著提升处理速度。
+
+## 特性
+
+  - **完整 KDZ 支持：** 解析并生成 KDZ 格式 V1、V2、V3。
+  - **固件解包：** 从 KDZ 中提取全部内容，包括：
+      - 主体 `.dz` 固件归档；
+      - 附带的分发库文件（`.dll` / `.dylib`）；
+      - `SecurePartition` 安全分区块；
+      - V3 特有的附加映射表（`suffix_map`、`sku_map` 等）。
+  - **分区镜像重建：** 把 `.dz` 内的压缩数据块重建成完整的分区镜像（如 `system.img`、`boot.img`），正确处理稀疏（sparse）布局与空洞。
+  - **固件重新打包：** 把解包目录（含被修改过的分区镜像）重新打成单个可刷写的 KDZ 文件，并重新计算校验和。
+  - **高性能：** 通过线程池并行做压缩（`zlib`/`zstd`）与解压缩，充分吃满 CPU。
+  - **元数据管理：** 解包时生成完整的 `metadata.json`，描述原 KDZ 的全部结构；它也是重新打包的唯一依据。
+  - **跨平台：** 基于 CMake 构建，可在 Windows、macOS、Linux 上编译运行。
+
+## 工作原理
+
+工具提供两个主命令：`extract` 和 `repack`。
+
+#### 解包流程
+
+1.  **解析 KDZ 头：** 读取 KDZ 主头，识别版本（V1/V2/V3），定位 `.dz` 归档和随附的 `.dll` 等组件。
+2.  **解析 DZ 与安全分区：** 解析 `SecurePartition` 块和 `.dz` 主头，校验 magic 与校验和。
+3.  **并行解压：** 解压是主要耗时环节，每个压缩数据块交给线程池中的一个工作线程。
+4.  **重建镜像：** 数据块解压后写入对应输出镜像（如 `0.boot.img`）中正确的稀疏偏移，从而还原出完整大小的分区镜像。
+5.  **提取附属文件：** `.dll`、`.dylib`、`suffix_map.dat` 等被提取到 `components` 子目录。
+6.  **生成元数据：** 最后把偏移、大小、校验和、版本信息、分区布局等全部结构信息写入可读的 `metadata.json`。
+
+#### 重新打包流程
+
+1.  **读取元数据：** 重新打包完全由解包目录中的 `metadata.json` 驱动。
+2.  **并行压缩：** 读取原始分区镜像（`.img`），按元数据切分成数据块，并行压缩。
+3.  **重建 DZ 归档：** 计算压缩数据的 MD5，在内存中组装出新的 `.dz`，并生成更新过 `chunk_hdrs_hash`、`data_hash`、`header_crc` 的新 DZ 主头。
+4.  **重建安全分区：** 按元数据重建 `SecurePartition` 块。
+5.  **组装最终 KDZ：** 写出重建的 `.dz`、`SecurePartition` 以及 `components` 目录中的组件，位置与原文件一致。
+6.  **写入最终头：** 数据就位后偏移和大小都已确定，最后构造 KDZ 头（V1/V2/V3）写到文件开头。
+
+## 依赖
+
+编译本项目需要：
+
+  - 支持 C++17 的编译器（GCC、Clang、MSVC 均可）
+  - CMake（3.15 或更高）
+  - **Zlib** 开发库（头文件与库）
+  - **Zstandard (zstd)** 开发库（头文件与库）
+
+## 编译
+
+用标准 C++ 编译器加 CMake 即可。例如在 Linux 下：
+
+```bash
+mkdir build && cd build
+cmake ..
+make -j$(nproc)
+```
+
+Windows 下用 MSYS2 UCRT64 或 MinGW-w64 时，可以这样得到一个不依赖额外 DLL 的静态可执行文件：
+
+```bat
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release ^
+      -DZLIB_USE_STATIC_LIBS=ON -DCMAKE_EXE_LINKER_FLAGS="-static"
+cmake --build build -j
+```
+
+## 用法
+
+命令行提供两个主命令：`extract` 与 `repack`。
+
+```
+A tool to extract and repack LG KDZ firmware.
+Usage: ./kdz-tool <command> [options]
+
+Commands:
+  extract    Extract a KDZ file to a folder.
+  repack     Repack an extracted folder into a KDZ file.
+
+General Options:
+  -h, --help           Show this help message and exit.
+```
+
+### 解包 KDZ
+
+解析 KDZ 并把内容提取到指定目录。若不指定目录，只打印头部信息、不写任何文件。
+
+**语法：**
+
+```
+./kdz-tool extract <kdz_file> [-d <path>] [--no-verify] [--strict] [--rawprogram] [--sector-size <bytes>]
+```
+
+  - `<kdz_file>`：输入 KDZ 固件路径。
+  - `-d, --dest <path>`：提取输出目录。
+  - `--no-verify`：（可选）跳过 DZ 数据的完整哈希校验，启动更快，适合只看信息。
+  - `--strict`：（可选）把"一致性差异"重新当作致命错误：校验和不匹配、字段取值异常、`part_start_sector` 与分区布局不符等。
+  - `--rawprogram`：（可选）在分区镜像旁额外生成 `rawprogram<N>.xml` 与 `patch<N>.xml`，使该目录可直接用于 9008/EDL（QFIL）刷机。必须配合 `-d`。
+  - `--sector-size <bytes>`：（可选）覆盖自动探测出的扇区大小，必须是 512 到 65536 之间的 2 的幂。
+
+#### 一致性警告与真正的错误
+
+默认情况下，解析器只在**结构性损坏**时中止：文件被截断、magic 不对、压缩方式没有对应解压器。凡是"文件里的值与我们**推算**出的值不一致"的情况（头部 CRC32、数据块头 MD5、数据 MD5、编译日期里的星期、本应为 0 的字段、`part_start_sector`），都只记一条警告并继续解析，而且**以文件里存的值作准**。所有发现都会列进 `metadata.json` 的 `diagnostics` 数组；加 `--strict` 即可恢复"一遇到不一致就中止"的老行为。
+
+#### 生成 9008/EDL（QFIL）刷机包
+
+加上 `--rawprogram` 后，解包命令会在分区镜像旁额外写出高通兼容的元数据：
+
+  - `rawprogram<N>.xml`：物理分区 `N` 的每个分区一条 `<program>`，指向 `<N>.<分区名>.img`，并带上起始扇区、扇区数、大小和 `SECTOR_SIZE_IN_BYTES`。若某个镜像的末端正好落在磁盘末尾（即备份 GPT），则改用 `NUM_DISK_SECTORS` 占位符定位，这样目标设备容量更大时它会跟着移动；其余条目仍写固定扇区号。
+  - `patch<N>.xml`：用于把"填充剩余容量"的那个分区扩到实际磁盘大小。与目标容量相关的值使用 `NUM_DISK_SECTORS` 占位符，由 QFIL 在刷机时代换。若固件里没有可增长的分区，该文件只包含一个空的 `<patches>`。
+
+扇区大小从固件内嵌的 GPT 读取。LG 设备只用 512 字节（eMMC）和 4096 字节（UFS）两种逻辑块，因此探测只尝试这两个值，并按 DZ 头里 `is_ufs` 标志暗示的那个值优先；若 GPT 结论与该标志矛盾，或与"按数据块大小投票"的启发式结论矛盾，都会记录为警告。找不到 GPT 时退回启发式，`--sector-size` 优先级最高——它也是强制其它奇特扇区大小的唯一途径。完整的 QFIL 刷机还需要配套的 firehose 引导程序（`prog_*.mbn`），它不在 KDZ 里。
+
+**示例：**
+
+```bash
+./kdz-tool extract G850UM20A_00_NAO_US_OP_0416.kdz -d G850_extracted
+```
+
+解包后目录结构大致如下：
+
+```
+G850_extracted/
+├── 0.PrimaryGPT.img
+├── 0.abl.img
+├── 0.boot.img
+├── ...（其余分区镜像）
+├── rawprogram0.xml        # 仅在加了 --rawprogram 时生成
+├── patch0.xml             # 仅在加了 --rawprogram 时生成
+├── components/
+│   ├── LGE_COMMON.dll
+│   ├── LGE_VER.dll
+│   ├── suffix_map.dat
+│   └── ...（其余组件）
+└── metadata.json
+```
+
+### 重新打包目录
+
+根据解包目录（含分区镜像、组件和 `metadata.json`）重建 KDZ。
+
+**语法：**
+
+```
+./kdz-tool repack <input_dir> <output_file>
+```
+
+  - `<input_dir>`：包含解包文件与 `metadata.json` 的目录。
+  - `<output_file>`：输出的新 KDZ 路径。
+
+**示例：**
+
+```bash
+./kdz-tool repack G850_extracted my_custom_firmware.kdz
+```
+
+## 许可证
+
+本项目使用 MIT 许可证，详见 [LICENSE](LICENSE)。
+
+## 致谢
+
+本工具依赖以下优秀的开源库：
+
+  - [**nlohmann/json**](https://github.com/nlohmann/json)：简单可靠的 JSON 解析与序列化。
+  - [**zlib**](https://www.zlib.net/)：处理 `zlib` 压缩。
+  - [**Zstandard (zstd)**](https://facebook.github.io/zstd/)：处理 `zstd` 压缩。
+  - MD5 实现参考 **bzflag** 的版本，见 [www.zedwood.com](http://www.zedwood.com/article/cpp-md5-function)。
+
+-----
+
+## 附录：头部结构与字段详解
+
+### KDZ 文件结构（`KdzHeader`）
+
+#### KDZ 头（V1 版本）
+总大小：1304 字节
+
+| 字段名 | 起始偏移 | 大小 | 数据类型 | 说明 |
+| :--- | :--- | :--- | :--- | :--- |
+| `size` | 0 | 4 | Unsigned Int | 头部大小，固定 1304 |
+| `magic` | 4 | 4 | Unsigned Int | 魔数，固定 `0x50447932` |
+| `dz_record` | 8 | 264 | Struct | DZ 文件记录（见下表） |
+| `dll_record` | 272 | 264 | Struct | DLL 文件记录（见下表） |
+| `padding` | 536 | 768 | Byte Array | 零填充 |
+
+**V1 记录结构（`V1_RECORD_FMT`）**
+大小：264 字节
+
+| 字段名 | 大小 | 数据类型 | 说明 |
+| :--- | :--- | :--- | :--- |
+| `name` | 256 | Char Array | 文件名（以 NUL 结尾的 ASCII 字符串） |
+| `size` | 4 | Unsigned Int | 文件大小 |
+| `offset` | 4 | Unsigned Int | 文件在 KDZ 中的起始偏移 |
+
+---
+
+#### KDZ 头（V2 版本）
+总大小：1320 字节
+
+| 字段名 | 起始偏移 | 大小 | 数据类型 | 说明 |
+| :--- | :--- | :--- | :--- | :--- |
+| `size` | 0 | 4 | Unsigned Int | 头部大小，固定 1320 |
+| `magic` | 4 | 4 | Unsigned Int | 魔数，固定 `0x80253134` |
+| `dz_record` | 8 | 272 | Struct | DZ 文件记录（见下表） |
+| `dll_record` | 280 | 272 | Struct | DLL 文件记录（见下表） |
+| `marker` | 552 | 1 | Byte | 标记字节，通常为 `0x00` 或 `0x03` |
+| `dylib_record` | 553 | 272 | Struct | dylib 文件记录（见下表） |
+| `unknown_record` | 825 | 272 | Struct | 未知记录（通常为空，见下表） |
+| `padding` | 1097 | 223 | Byte Array | 零填充 |
+
+**V2/V3 记录结构（`V2_RECORD_FMT`）**
+大小：272 字节
+
+| 字段名 | 大小 | 数据类型 | 说明 |
+| :--- | :--- | :--- | :--- |
+| `name` | 256 | Char Array | 文件名（以 NUL 结尾的 ASCII 字符串） |
+| `size` | 8 | Unsigned Long | 文件大小（升级为 64 位以支持大于 4GB 的文件） |
+| `offset` | 8 | Unsigned Long | 文件在 KDZ 中的起始偏移（升级为 64 位） |
+
+---
+
+#### KDZ 头（V3 版本）
+总大小：1320 字节
+
+| 字段名 | 起始偏移 | 大小 | 数据类型 | 说明 |
+| :--- | :--- | :--- | :--- | :--- |
+| `size` | 0 | 4 | Unsigned Int | 头部大小，固定 1320 |
+| `magic` | 4 | 4 | Unsigned Int | 魔数，固定 `0x25223824` |
+| `dz_record` | 8 | 272 | Struct | DZ 文件记录（结构与 V2 相同） |
+| `dll_record` | 280 | 272 | Struct | DLL 文件记录（结构与 V2 相同） |
+| `marker` | 552 | 1 | Byte | 标记字节，通常为 `0x00` 或 `0x03` |
+| `dylib_record` | 553 | 272 | Struct | dylib 文件记录（结构与 V2 相同） |
+| `unknown_record` | 825 | 272 | Struct | 未知记录（通常为空，结构与 V2 相同） |
+| `extended_mem_id_size` | 1097 | 4 | Unsigned Int | 扩展内存 ID 的大小 |
+| `tag` | 1101 | 5 | Char Array | 标签信息（例如 "5.19"） |
+| `additional_records_size` | 1106 | 8 | Unsigned Long | 全部附加记录的总大小 |
+| `suffix_map_offset` | 1114 | 8 | Unsigned Long | Suffix Map 偏移 |
+| `suffix_map_size` | 1122 | 4 | Unsigned Int | Suffix Map 大小 |
+| `sku_map_offset` | 1126 | 8 | Unsigned Long | SKU Map 偏移 |
+| `sku_map_size` | 1134 | 4 | Unsigned Int | SKU Map 大小 |
+| `ftm_model_name` | 1138 | 32 | Char Array | FTM（工厂测试模式）机型名 |
+| `extended_sku_map_offset` | 1170 | 8 | Unsigned Long | 扩展 SKU Map 偏移 |
+| `extended_sku_map_size` | 1178 | 4 | Unsigned Int | 扩展 SKU Map 大小 |
+| `padding` | 1182 | 138 | Byte Array | 零填充 |
+
+---
+
+### 安全分区结构（`SecurePartition`）
+总大小：82448 字节，固定偏移：1320
+
+#### 安全分区头
+大小：528 字节
+
+| 字段名 | 起始偏移 | 大小 | 数据类型 | 说明 |
+| :--- | :--- | :--- | :--- | :--- |
+| `magic` | 0 | 4 | Unsigned Int | 魔数，固定 `0x53430799` |
+| `flags` | 4 | 4 | Unsigned Int | 标志位 |
+| `part_count` | 8 | 4 | Unsigned Int | 分区记录总数 |
+| `sig_size` | 12 | 4 | Unsigned Int | 签名长度 |
+| `signature` | 16 | 512 | Byte Array | 安全签名（最长 512 字节） |
+
+#### 安全分区记录结构
+大小：80 字节
+
+| 字段名 | 大小 | 数据类型 | 说明 |
+| :--- | :--- | :--- | :--- |
+| `name` | 30 | Char Array | 分区名（以 NUL 结尾的 ASCII 字符串） |
+| `hw_part` | 1 | Byte | 硬件分区号 |
+| `logical_part` | 1 | Byte | 逻辑分区号 |
+| `start_sect` | 4 | Unsigned Int | 起始扇区 |
+| `end_sect` | 4 | Unsigned Int | 结束扇区 |
+| `data_sect_cnt` | 4 | Unsigned Int | 数据占用的扇区数 |
+| `reserved` | 4 | Unsigned Int | 保留字段，应为 0 |
+| `hash` | 32 | Byte Array | 分区校验值（SHA-256） |
+
+---
+
+### DZ 文件结构（`DzHeader`）
+
+#### DZ 主头（`HDR_FMT`）
+总大小：512 字节
+
+| 字段名 | 大小 | 数据类型 | 说明 |
+| :--- | :--- | :--- | :--- |
+| `magic` | 4 | Unsigned Int | DZ 头魔数，固定 `0x74189632` |
+| `major` | 4 | Unsigned Int | DZ 格式主版本号 |
+| `minor` | 4 | Unsigned Int | DZ 格式次版本号 |
+| `reserved` | 4 | Unsigned Int | 保留字段，应为 0 |
+| `model_name` | 32 | Char Array | 设备机型名 |
+| `sw_version` | 128 | Char Array | 软件版本号 |
+| `build_date` | 16 | 8x Unsigned Short | 编译日期（年/月/星期/日/时/分/秒/毫秒） |
+| `part_count` | 4 | Unsigned Int | 分区数据块总数 |
+| `chunk_hdrs_hash` | 16 | Byte Array | 全部数据块头的 MD5 |
+| `secure_image_type` | 1 | Byte | 安全镜像类型 |
+| `compression` | 9 | Char Array / Byte | 压缩类型（`zlib`/`zstd` 或 1/4） |
+| `data_hash` | 16 | Byte Array | 全部数据的 MD5 |
+| `swfv` | 50 | Char Array | 软件固件版本（SWFV） |
+| `build_type` | 16 | Char Array | 编译类型（USER/DEBUG） |
+| `unknown_0` | 4 | Unsigned Int | 未知字段，应为 0 |
+| `header_crc` | 4 | Unsigned Int | DZ 主头的 CRC32 |
+| `android_ver` | 10 | Char Array | Android 版本号 |
+| `memory_size` | 11 | Char Array | 内存大小 |
+| `signed_security` | 4 | Char Array | 是否为安全签名（`Y` 或 `N`） |
+| `is_ufs` | 4 | Unsigned Int | 是否为 UFS 存储（非 0 表示是） |
+| `anti_rollback_ver` | 4 | Unsigned Int | 防回滚版本号 |
+| `supported_mem` | 64 | Char Array | 支持的存储类型列表 |
+| `target_product` | 24 | Char Array | 目标产品名 |
+| `multi_panel_mask` | 1 | Byte | 多面板支持位掩码 |
+| `product_fuse_id` | 1 | Byte | 产品熔丝 ID（0-9 的 ASCII 数字） |
+| `unknown_1` | 4 | Unsigned Int | 未知字段，应为 0 或 `0xFFFFFFFF` |
+| `is_factory_image` | 1 | Byte | 是否为工厂固件（ASCII `F` 表示是） |
+| `operator_code` | 24 | Char Array | 运营商代码 |
+| `unknown_2` | 4 | Unsigned Int | 未知字段，应为 0 或 1 |
+| `padding` | 44 | Byte Array | 零填充 |
+
+#### DZ 数据块头（V0 版本）
+总大小：124 字节
+
+| 字段名 | 大小 | 数据类型 | 说明 |
+| :--- | :--- | :--- | :--- |
+| `magic` | 4 | Unsigned Int | 数据块魔数，固定 `0x78951230` |
+| `part_name` | 32 | Char Array | 所属分区名 |
+| `chunk_name` | 64 | Char Array | 数据块名 |
+| `decompressed_size` | 4 | Unsigned Int | 解压后大小 |
+| `compressed_size` | 4 | Unsigned Int | 压缩后大小 |
+| `hash` | 16 | Byte Array | 数据块数据的 MD5 |
+
+#### DZ 数据块头（V1 版本）
+总大小：512 字节
+
+| 字段名 | 大小 | 数据类型 | 说明 |
+| :--- | :--- | :--- | :--- |
+| `magic` | 4 | Unsigned Int | 数据块魔数，固定 `0x78951230` |
+| `part_name` | 32 | Char Array | 所属分区名（切片名） |
+| `chunk_name` | 64 | Char Array | 数据块名 |
+| `decompressed_size` | 4 | Unsigned Int | 解压后大小 |
+| `compressed_size` | 4 | Unsigned Int | 压缩后大小 |
+| `hash` | 16 | Byte Array | 数据块数据的 MD5 |
+| `start_sector` | 4 | Unsigned Int | 在设备上的起始扇区 |
+| `sector_count` | 4 | Unsigned Int | 占用的扇区数 |
+| `hw_partition` | 4 | Unsigned Int | 硬件分区号（LUN） |
+| `crc` | 4 | Unsigned Int | 数据块的 CRC32 |
+| `unique_part_id` | 4 | Unsigned Int | 唯一分区 ID |
+| `is_sparse` | 4 | Unsigned Int | 是否为稀疏镜像 |
+| `is_ubi_image` | 4 | Unsigned Int | 是否为 UBI 镜像 |
+| `part_start_sector` | 4 | Unsigned Int | 整个分区的起始扇区（重建镜像时的基准） |
+| `padding` | 356 | Byte Array | 零填充 |
+
+### 说明
+* 所有多字节整数（short、int、long 等）均为 **小端序（Little-endian）**。
+* 所有大小单位均为 **字节（Byte）**。

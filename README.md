@@ -1,5 +1,7 @@
 # LG KDZ Firmware Tool
 
+**English** | [中文说明](README_CN.md)
+
 A high-performance, cross-platform command-line utility for extracting and repacking LG official firmware files (`.kdz`). This tool is written in modern C++ and is designed for power users, developers, and researchers who need to inspect or modify LG device firmware.
 
 ## Overview
