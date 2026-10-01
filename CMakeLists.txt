@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(KDZTool CXX)
+project(KDZTool VERSION 1.1.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -45,6 +45,8 @@ add_executable(kdz-tool
     common/decompressor.cpp
     common/md5.cpp
 )
+
+target_compile_definitions(kdz-tool PRIVATE KDZ_TOOL_VERSION="${PROJECT_VERSION}")
 
 target_include_directories(kdz-tool PRIVATE
     ${PROJECT_SOURCE_DIR}/common

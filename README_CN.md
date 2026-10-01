@@ -1,5 +1,7 @@
 # LG KDZ 固件工具
 
+[![release](https://img.shields.io/github/v/release/Fer1d/KDZTool?sort=semver)](https://github.com/Fer1d/KDZTool/releases) [![build](https://github.com/Fer1d/KDZTool/actions/workflows/build.yml/badge.svg)](https://github.com/Fer1d/KDZTool/actions/workflows/build.yml)
+
 **中文** | [English](README.md)
 
 一个高性能、跨平台的命令行工具，用于解包（extract）和重新打包（repack）LG 官方固件（`.kdz`）。本工具用现代 C++ 编写，面向需要检查或修改 LG 设备固件的进阶用户、开发者和研究人员。

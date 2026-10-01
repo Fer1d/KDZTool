@@ -24,8 +24,12 @@
 
 namespace fs = std::filesystem;
 
+#ifndef KDZ_TOOL_VERSION
+#define KDZ_TOOL_VERSION "unknown"
+#endif
+
 void printUsage(const char* progName) {
-    std::cerr << "A tool to extract and repack LG KDZ firmware." << std::endl;
+    std::cerr << "A tool to extract and repack LG KDZ firmware (KDZTool " << KDZ_TOOL_VERSION << ")." << std::endl;
     std::cerr << "Usage: " << progName << " <command> [options]" << std::endl << std::endl;
     std::cerr << "Commands:" << std::endl;
     std::cerr << "  extract    Extract a KDZ file to a folder." << std::endl;
@@ -51,13 +55,18 @@ void printUsage(const char* progName) {
     std::cerr << "    --compression <n>    Compression level from 1 (fastest) to 22 (smallest)." << std::endl;
     std::cerr << "                         The default is the compression library's own default." << std::endl << std::endl;
     std::cerr << "General Options:" << std::endl;
+    std::cerr << "  -v, --version        Show the version and exit." << std::endl;
     std::cerr << "  -h, --help           Show this help message and exit." << std::endl;
 }
 
 int main(int argc, char* argv[]) {
-    // Handle help options in priority
+    // Handle help and version options in priority
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
+        if (arg == "-v" || arg == "--version") {
+            std::cout << "KDZTool " << KDZ_TOOL_VERSION << std::endl;
+            return 0;
+        }
         if (arg == "-h" || arg == "--help") {
             printUsage(argv[0]);
             return 0;
