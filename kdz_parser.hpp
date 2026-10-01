@@ -6,6 +6,7 @@
 #include <vector>
 #include <fstream>
 #include "shared_structure.hpp"
+#include "diagnostics.hpp"
 
 class KdzHeader {
 public:
@@ -34,13 +35,15 @@ public:
     AdditionalRecord sku_map;
     AdditionalRecord extended_sku_map;
 
-    explicit KdzHeader(std::ifstream& file);
+    explicit KdzHeader(std::ifstream& file, Diagnostics& diag);
     void print_info(std::ifstream& file) const;
 
 private:
     void parse_v1_header(const std::vector<char>& data);
     void parse_v2_header(const std::vector<char>& data);
     void parse_v3_header(const std::vector<char>& data);
+
+    Diagnostics& diag_;
 };
 
 #endif // KDZ_PARSER_HPP

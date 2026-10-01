@@ -86,12 +86,17 @@ This command parses a KDZ file and extracts its contents into a specified direct
 **Syntax:**
 
 ```
-./kdz-tool extract <kdz_file> [-d <path>] [--no-verify]
+./kdz-tool extract <kdz_file> [-d <path>] [--no-verify] [--strict]
 ```
 
   - `<kdz_file>`: Path to the input KDZ firmware file.
   - `-d, --dest <path>`: The directory to extract files to.
   - `--no-verify`: (Optional) Skip the full DZ data hash verification for a faster initial parse. Useful for quick inspection.
+  - `--strict`: (Optional) Treat consistency problems as hard errors again: checksum mismatches, unexpected field values, a `part_start_sector` that disagrees with the partition layout, and so on.
+
+#### Consistency warnings vs. real errors
+
+By default the parser only stops on structural damage - a truncated file, a wrong magic number, or a compression scheme the tool has no decompressor for. Everything that merely disagrees with a value the tool *derived* from the file (header CRC32, the MD5 of the chunk headers and of the data, the build weekday, fields that are only expected to be zero, `part_start_sector`) is reported as a warning instead of aborting the parse, and the value stored in the file always wins. All findings are listed in the `diagnostics` array of `metadata.json`, and `--strict` restores the old abort-on-first-mismatch behaviour.
 
 **Example:**
 

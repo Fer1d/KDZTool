@@ -1,6 +1,7 @@
 #include "dz_parser.hpp"
 #include "utils.hpp"
 #include "md5.hpp"
+#include "diagnostics.hpp"
 #include <iostream>
 #include <stdexcept>
 #include <zlib.h>
@@ -10,19 +11,23 @@
 #include <iomanip>
 #include <sstream>
 #include <algorithm>
+#include <map>
+#include <utility>
 
 #if defined(_WIN32) || defined(_WIN64)
 #define timegm _mkgmtime
 #endif
 
-DzHeader::DzHeader(std::ifstream& file, const KdzHeader::Record& dz_record, bool skip_verification) {
+DzHeader::DzHeader(std::ifstream& file, const KdzHeader::Record& dz_record,
+                   bool skip_verification, Diagnostics& diag)
+    : diag_(diag) {
     file.seekg(dz_record.offset);
     
     // Read the entire header into a raw byte buffer first.
     std::vector<char> hdr_bytes(sizeof(DzMainHeader));
     file.read(hdr_bytes.data(), hdr_bytes.size());
     if (!file) {
-        throw std::runtime_error("Failed to read DZ header from file.");
+        diag_.fatal("DZ header", "failed to read the DZ header from the file");
     }
 
     DzMainHeader hdr;
@@ -45,12 +50,13 @@ DzHeader::DzHeader(std::ifstream& file, const KdzHeader::Record& dz_record, bool
         uint32_t calculated_crc = crc32(0L, Z_NULL, 0);
         calculated_crc = crc32(calculated_crc, reinterpret_cast<const Bytef*>(&hdr_for_crc), sizeof(DzMainHeader));
         
-        // The check is now fully implemented with a detailed error message.
+        // The header CRC only cross-checks the header against itself, so a
+        // mismatch is reported instead of aborting the whole extraction.
         if (original_crc != calculated_crc) {
-            std::ostringstream oss;
-            oss << "Header CRC mismatch: expected 0x" << std::hex << original_crc
-                << ", got 0x" << calculated_crc;
-            throw std::runtime_error(oss.str());
+            std::ostringstream stored_crc, derived_crc;
+            stored_crc << "0x" << std::hex << original_crc;
+            derived_crc << "0x" << std::hex << calculated_crc;
+            diag_.inconsistent("DZ header", "header CRC32", stored_crc.str(), derived_crc.str());
         }
     }
 
@@ -65,24 +71,36 @@ DzHeader::DzHeader(std::ifstream& file, const KdzHeader::Record& dz_record, bool
         }
     }
     
-    // Assertions for header integrity, now fully implemented.
-    if (hdr.magic != DZ_MAGIC) throw std::runtime_error("Invalid DZ header magic");
+    // Structural requirement: without the magic we are not looking at a DZ file
+    // at all, so this one aborts in every mode.
+    if (hdr.magic != DZ_MAGIC) diag_.fatal("DZ header", "invalid DZ header magic");
+
+    // Everything below only tests our assumptions about the format. The file is
+    // still perfectly readable, so these findings are reported instead of
+    // aborting; with --strict they behave like the old hard failures again.
     if (hdr.major > 2 || hdr.minor > 1) {
-        throw std::runtime_error("Unexpected DZ version " + std::to_string(hdr.major) + "." + std::to_string(hdr.minor));
+        diag_.unexpected("DZ header", "unexpected DZ format version " + std::to_string(hdr.major) +
+                         "." + std::to_string(hdr.minor) + ", parsing it with the 2.1 layout");
     }
-    if (hdr.reserved != 0) throw std::runtime_error("Unexpected value for reserved field");
-    if (hdr.part_count == 0) throw std::runtime_error("Expected positive part count, got " + std::to_string(hdr.part_count));
-    if (hdr.unknown_0 != 0) throw std::runtime_error("Expected 0 in unknown field, got " + std::to_string(hdr.unknown_0));
+    if (hdr.reserved != 0) {
+        diag_.unexpected("DZ header", "reserved field is " + std::to_string(hdr.reserved) + " instead of 0");
+    }
+    if (hdr.part_count == 0) {
+        diag_.unexpected("DZ header", "part count is 0, the archive contains no partitions");
+    }
+    if (hdr.unknown_0 != 0) {
+        diag_.unexpected("DZ header", "unknown field 0 is " + std::to_string(hdr.unknown_0) + " instead of 0");
+    }
     if (hdr.unknown_1 != 0 && hdr.unknown_1 != 0xffffffff) {
         std::ostringstream oss;
-        oss << "Unexpected value in unknown field: 0x" << std::hex << hdr.unknown_1;
-        throw std::runtime_error(oss.str());
+        oss << "unknown field 1 is 0x" << std::hex << hdr.unknown_1 << " instead of 0 or 0xffffffff";
+        diag_.unexpected("DZ header", oss.str());
     }
     if (hdr.unknown_2 != 0 && hdr.unknown_2 != 1) {
-        throw std::runtime_error("Expected 0 or 1 in unknown field, got " + std::to_string(hdr.unknown_2));
+        diag_.unexpected("DZ header", "unknown field 2 is " + std::to_string(hdr.unknown_2) + " instead of 0 or 1");
     }
     if (!std::all_of(hdr.padding, hdr.padding + 44, [](char c){ return c == 0; })) {
-        throw std::runtime_error("Non zero bytes in header padding");
+        diag_.unexpected("DZ header", "non zero bytes in the header padding");
     }
     
     // Assign attributes from parsed header data. ALL fields are now explicitly assigned.
@@ -100,15 +118,16 @@ DzHeader::DzHeader(std::ifstream& file, const KdzHeader::Record& dz_record, bool
     if (!comp_str.empty() && std::isalpha(static_cast<unsigned char>(comp_str[0]))) {
         std::transform(comp_str.begin(), comp_str.end(), comp_str.begin(), ::tolower);
         if (comp_str != "zlib" && comp_str != "zstd") {
-            throw std::runtime_error("Unknown compression " + comp_str);
+            // No decompressor for this, so the payload can never be read.
+            diag_.fatal("DZ header", "unknown compression " + comp_str);
         }
         this->compression = comp_str;
     } else {
         if (!std::all_of(hdr.compression + 1, hdr.compression + 9, [](char c){ return c == 0; })) {
-            throw std::runtime_error("Non zero bytes after compression type byte");
+            diag_.unexpected("DZ header", "non zero bytes after the compression type byte");
         }
         if (hdr.compression[0] != 1 && hdr.compression[0] != 4) {
-            throw std::runtime_error("Unknown compression type " + std::to_string(hdr.compression[0]));
+            diag_.fatal("DZ header", "unknown compression type " + std::to_string(hdr.compression[0]));
         }
         this->compression = (hdr.compression[0] == 1) ? "zlib" : "zstd";
     }
@@ -160,7 +179,8 @@ DzHeader::DzHeader(std::ifstream& file, const KdzHeader::Record& dz_record, bool
             // Firmware's tm_wday is 0=Monday..6=Sunday. C/C++'s tm_wday is 0=Sunday..6=Saturday.
             int weekday = (check_tm.tm_wday == 0) ? 6 : check_tm.tm_wday - 1; 
             if (weekday != hdr.build_date[2]) {
-                throw std::runtime_error("Invalid build weekday. Expected " + std::to_string(weekday) + ", got " + std::to_string(hdr.build_date[2]));
+                diag_.inconsistent("DZ header", "build weekday stored in the header",
+                                   std::to_string(hdr.build_date[2]), std::to_string(weekday));
             }
         }
     } else {
@@ -184,8 +204,11 @@ void DzHeader::parse_part_headers(std::ifstream& file, bool verify_data_hash) {
         data_hash_ctx.update(reinterpret_cast<const char*>(&hdr_for_hash), sizeof(DzMainHeader));
     }
     
-    uint32_t part_start_sector = 0;
-    uint32_t part_sector_count = 0;
+    // part_start_sector is a constant of the logical partition that every chunk
+    // header repeats. Remember the first value seen per (hardware partition,
+    // partition name) so that later chunks can be cross-checked against it.
+    using PartKey = std::pair<uint32_t, std::string>;
+    std::map<PartKey, uint32_t> part_bases;
 
     bool is_v0 = (this->minor == 0);
 
@@ -201,7 +224,7 @@ void DzHeader::parse_part_headers(std::ifstream& file, bool verify_data_hash) {
             DzChunkHeaderV0 chunk_hdr;
             std::memcpy(&chunk_hdr, chunk_hdr_data.data(), sizeof(DzChunkHeaderV0));
             
-            if (chunk_hdr.magic != DZ_PART_MAGIC) throw std::runtime_error("Invalid part magic");
+            if (chunk_hdr.magic != DZ_PART_MAGIC) diag_.fatal("DZ chunk header", "invalid partition magic");
             part_name_str = decode_asciiz(chunk_hdr.part_name, 32);
             chunk.name = decode_asciiz(chunk_hdr.chunk_name, 64);
             chunk.data_size = chunk_hdr.decompressed_size;
@@ -220,7 +243,7 @@ void DzHeader::parse_part_headers(std::ifstream& file, bool verify_data_hash) {
             DzChunkHeaderV1 chunk_hdr;
             std::memcpy(&chunk_hdr, chunk_hdr_data.data(), sizeof(DzChunkHeaderV1));
 
-            if (chunk_hdr.magic != DZ_PART_MAGIC) throw std::runtime_error("Invalid part magic");
+            if (chunk_hdr.magic != DZ_PART_MAGIC) diag_.fatal("DZ chunk header", "invalid partition magic");
             part_name_str = decode_asciiz(chunk_hdr.part_name, 32);
             chunk.name = decode_asciiz(chunk_hdr.chunk_name, 64);
             chunk.data_size = chunk_hdr.decompressed_size;
@@ -235,50 +258,35 @@ void DzHeader::parse_part_headers(std::ifstream& file, bool verify_data_hash) {
             chunk.is_ubi_image = (chunk_hdr.is_ubi_image != 0);
             chunk.file_offset = file.tellg();
 
-            auto hw_it = std::find_if(parts.begin(), parts.end(), 
-                                      [&](const auto& p){ return p.first == hw_partition; });
-            
-            bool is_new_hw_part = (hw_it == parts.end());
-            
-            bool is_new_part_name = true;
-            if (!is_new_hw_part) {
-                auto& part_name_vec = hw_it->second;
-                auto name_it = std::find_if(part_name_vec.begin(), part_name_vec.end(),
-                                            [&](const auto& p) { return p.first == part_name_str; });
-                is_new_part_name = (name_it == part_name_vec.end());
-            }
-
-            if (is_new_hw_part) {
-                part_start_sector = 0;
-                part_sector_count = 0;
-                if(chunk_hdr.part_start_sector > part_start_sector && chunk_hdr.part_start_sector <= chunk.start_sector) {
-                    part_start_sector = chunk_hdr.part_start_sector;
-                }
-            } else if (is_new_part_name) {
-                if (chunk_hdr.part_start_sector == 0) {
-                    part_start_sector = chunk.start_sector;
+            // part_start_sector is a constant of the logical partition that every
+            // chunk header repeats: the first sector of the whole partition, which
+            // is used as the base offset when the partition image is rebuilt. The
+            // value stored in the header therefore wins; we only derive one when
+            // the header leaves the field at zero, and disagreement between the
+            // chunks of a partition is reported instead of aborting the parse.
+            const PartKey part_key = std::make_pair(hw_partition, part_name_str);
+            auto base_it = part_bases.find(part_key);
+            if (base_it == part_bases.end()) {
+                uint32_t base = chunk.start_sector;
+                if (chunk_hdr.part_start_sector != 0) {
+                    base = chunk_hdr.part_start_sector;
                 } else {
-                    part_start_sector += part_sector_count;
-                    if(chunk_hdr.part_start_sector > part_start_sector && chunk_hdr.part_start_sector <= chunk.start_sector) {
-                        part_start_sector = chunk_hdr.part_start_sector;
-                    }
+                    diag_.info("DZ partition " + part_name_str,
+                               "part_start_sector is not set in the chunk header, using the first chunk "
+                               "start sector " + std::to_string(chunk.start_sector) + " as the partition base");
                 }
-                part_sector_count = 0;
-            }
-            
-            // [PATCH 1] 只要 chunk 头提供了非零的 part_start_sector，就优先采用它，
-            // 不再因为与推算值不一致而中止解析。
-            if (chunk_hdr.part_start_sector != 0) {
-                part_start_sector = chunk_hdr.part_start_sector;
+                base_it = part_bases.emplace(part_key, base).first;
+            } else if (chunk_hdr.part_start_sector != 0 &&
+                       chunk_hdr.part_start_sector != base_it->second) {
+                diag_.inconsistent("DZ partition " + part_name_str, "part_start_sector",
+                                   std::to_string(chunk_hdr.part_start_sector),
+                                   std::to_string(base_it->second));
             }
 
-            chunk.part_start_sector = part_start_sector;
-            // [PATCH 2] 防止 part_start_sector > chunk.start_sector 时出现无符号下溢。
-            if (chunk.start_sector >= part_start_sector) {
-                part_sector_count = (chunk.start_sector - part_start_sector) + chunk.sector_count;
-            } else {
-                part_sector_count = chunk.sector_count;
-            }
+            // A zero field means "value not stored"; fall back to the derived base.
+            chunk.part_start_sector = (chunk_hdr.part_start_sector != 0)
+                                          ? chunk_hdr.part_start_sector
+                                          : base_it->second;
         }
         
         chunk_hdrs_hash_ctx.update(chunk_hdr_data.data(), chunk_hdr_data.size());
@@ -318,19 +326,19 @@ void DzHeader::parse_part_headers(std::ifstream& file, bool verify_data_hash) {
     }
 
     chunk_hdrs_hash_ctx.finalize();
-    // [PATCH 3] 哈希不匹配不再抛异常，只打印警告，继续解析。
+    // Cross-checks between the stored hashes and the data: report, do not abort.
     if (chunk_hdrs_hash_ctx.hexdigest() != bytes_to_hex(this->chunk_hdrs_hash)) {
-        std::cerr << "Warning: Chunk headers hash mismatch (expected "
-                  << bytes_to_hex(this->chunk_hdrs_hash) << ", got "
-                  << chunk_hdrs_hash_ctx.hexdigest() << "). Continuing anyway." << std::endl;
+        diag_.inconsistent("DZ chunk headers", "MD5 hash",
+                           bytes_to_hex(this->chunk_hdrs_hash),
+                           chunk_hdrs_hash_ctx.hexdigest());
     }
 
     if (verify_data_hash) {
         data_hash_ctx.finalize();
         if (data_hash_ctx.hexdigest() != bytes_to_hex(this->data_hash)) {
-            std::cerr << "Warning: Data hash mismatch (expected "
-                      << bytes_to_hex(this->data_hash) << ", got "
-                      << data_hash_ctx.hexdigest() << "). Continuing anyway." << std::endl;
+            diag_.inconsistent("DZ data", "MD5 hash",
+                               bytes_to_hex(this->data_hash),
+                               data_hash_ctx.hexdigest());
         }
     }
 }

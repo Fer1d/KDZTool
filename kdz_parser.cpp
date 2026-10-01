@@ -6,7 +6,7 @@
 #include <cstring>
 #include <algorithm>
 
-KdzHeader::KdzHeader(std::ifstream& file) {
+KdzHeader::KdzHeader(std::ifstream& file, Diagnostics& diag) : diag_(diag) {
     file.seekg(0);
     std::vector<char> hdr_data(KDZV3_HDR_SIZE);
     file.read(hdr_data.data(), KDZV3_HDR_SIZE);
@@ -22,7 +22,8 @@ KdzHeader::KdzHeader(std::ifstream& file) {
     } else if (read_size == KDZV1_HDR_SIZE && read_magic == KDZV1_MAGIC) {
         parse_v1_header(hdr_data);
     } else {
-        throw std::runtime_error("Unknown KDZ header (size=" + std::to_string(read_size) + ", magic=0x" + bytes_to_hex(reinterpret_cast<uint8_t*>(&read_magic), 4) + ")");
+        diag_.fatal("KDZ header", "unknown KDZ header (size=" + std::to_string(read_size) +
+                                                  ", magic=0x" + bytes_to_hex(reinterpret_cast<uint8_t*>(&read_magic), 4) + ")");
     }
     this->magic = read_magic;
     this->size = read_size;
@@ -62,7 +63,8 @@ void KdzHeader::parse_v2_header(const std::vector<char>& data) {
     
     uint8_t marker = *reinterpret_cast<const uint8_t*>(p);
     if (marker != 0x00 && marker != 0x03) {
-         throw std::runtime_error("Unexpected byte after DLL record: 0x" + bytes_to_hex(&marker, 1));
+        // Same as in the V3 header: the byte is not used for anything else.
+        diag_.unexpected("KDZ header", "unexpected byte after the DLL record: 0x" + bytes_to_hex(&marker, 1));
     }
     p += 1;
 
@@ -99,7 +101,9 @@ void KdzHeader::parse_v3_header(const std::vector<char>& data) {
 
     uint8_t marker = *reinterpret_cast<const uint8_t*>(p);
     if (marker != 0x00 && marker != 0x03) {
-         throw std::runtime_error("Unexpected byte after DLL record: 0x" + bytes_to_hex(&marker, 1));
+        // The value is not used to advance the cursor, it only tells us that the
+        // header layout differs from the one we know; keep going.
+        diag_.unexpected("KDZ header", "unexpected byte after the DLL record: 0x" + bytes_to_hex(&marker, 1));
     }
     p += 1;
 

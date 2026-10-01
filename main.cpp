@@ -10,6 +10,7 @@
 
 // --- Headers required for unpacking ---
 #include "kdz_parser.hpp"
+#include "diagnostics.hpp"
 #include "secure_partition_parser.hpp"
 #include "dz_parser.hpp"
 #include "extractor.hpp"
@@ -29,11 +30,13 @@ void printUsage(const char* progName) {
     std::cerr << "  extract    Extract a KDZ file to a folder." << std::endl;
     std::cerr << "  repack     Repack an extracted folder into a KDZ file." << std::endl << std::endl;
     std::cerr << "Options for 'extract':" << std::endl;
-    std::cerr << "  " << progName << " extract <kdz_file> [-d <path>] [--no-verify]" << std::endl;
+    std::cerr << "  " << progName << " extract <kdz_file> [-d <path>] [--no-verify] [--strict]" << std::endl;
     std::cerr << "    <kdz_file>           Path to the input KDZ firmware file." << std::endl;
     std::cerr << "    -d, --dest <path>    The directory to extract files to." << std::endl;
     std::cerr << "                         (If not specified, only header info will be printed)." << std::endl;
-    std::cerr << "    --no-verify          Skip DZ data hash verification for faster startup." << std::endl << std::endl;
+    std::cerr << "    --no-verify          Skip DZ data hash verification for faster startup." << std::endl;
+    std::cerr << "    --strict             Abort on consistency problems (checksum mismatches," << std::endl;
+    std::cerr << "                         unexpected field values) instead of warning about them." << std::endl << std::endl;
     std::cerr << "Options for 'repack':" << std::endl;
     std::cerr << "  " << progName << " repack <input_dir> <output_file>" << std::endl;
     std::cerr << "    <input_dir>          Path to the directory containing extracted files and metadata.json." << std::endl;
@@ -67,11 +70,14 @@ int main(int argc, char* argv[]) {
             std::string file_path;
             std::optional<std::string> extract_path;
             bool skip_verification = false;
+            bool strict = false;
 
             for (int i = 2; i < argc; ++i) {
                 std::string arg = argv[i];
                 if (arg == "--no-verify") {
                     skip_verification = true;
+                } else if (arg == "--strict") {
+                    strict = true;
                 } else if (arg == "-d" || arg == "--dest") {
                     if (i + 1 < argc) {
                         extract_path = argv[++i];
@@ -101,11 +107,13 @@ int main(int argc, char* argv[]) {
                 throw std::runtime_error("Cannot open file " + file_path);
             }
 
-            // 1. Parse all headers and store the object
-            KdzHeader kdz_header(in_file);
+            // 1. Parse all headers and store the object. `diag` collects every
+            // consistency problem so that parsing no longer stops on the first one.
+            Diagnostics diag(strict);
+            KdzHeader kdz_header(in_file, diag);
             kdz_header.print_info(in_file);
 
-            std::optional<SecurePartition> sec_part = SecurePartition::parse(in_file);
+            std::optional<SecurePartition> sec_part = SecurePartition::parse(in_file, diag);
             if (sec_part.has_value()) {
                 sec_part->print_info();
             } else {
@@ -123,7 +131,7 @@ int main(int argc, char* argv[]) {
                 throw std::runtime_error("No DZ record in KDZ file");
             }
 
-            DzHeader dz_hdr(in_file, *dz_record_ptr, skip_verification);
+            DzHeader dz_hdr(in_file, *dz_record_ptr, skip_verification, diag);
             dz_hdr.print_info();
 
             // 2. If unpacking is requested, extract all embedded objects and their metadata.
@@ -160,6 +168,13 @@ int main(int argc, char* argv[]) {
                  }
             }
 
+            // Compact summary of everything that looked suspicious. The details
+            // are in the diagnostics section of metadata.json.
+            if (diag.warning_count() > 0) {
+                std::cerr << "[!] Finished with " << diag.warning_count()
+                          << " consistency warning(s); re-run with --strict to turn them into errors."
+                          << std::endl;
+            }
         } else if (command == "repack") {
             if (argc != 4) {
                 std::cerr << "Error: Invalid number of arguments for repack command." << std::endl;

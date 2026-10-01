@@ -9,6 +9,7 @@
 #include <optional>
 #include "kdz_parser.hpp"
 #include "shared_structure.hpp"
+#include "diagnostics.hpp"
 
 class DzHeader {
 public:
@@ -55,12 +56,19 @@ public:
 
     std::vector<std::pair<uint32_t, std::vector<std::pair<std::string, std::vector<Chunk>>>>> parts;
 
-    explicit DzHeader(std::ifstream& file, const KdzHeader::Record& dz_record, bool skip_verification);
+    explicit DzHeader(std::ifstream& file, const KdzHeader::Record& dz_record,
+                      bool skip_verification, Diagnostics& diag);
     void print_info() const;
     uint64_t sector_size() const;
 
+    // Warnings and consistency findings collected while parsing. They are also
+    // written into metadata.json by the metadata generator.
+    const Diagnostics& diagnostics() const { return diag_; }
+
 private:
     void parse_part_headers(std::ifstream& file, bool verify_data_hash);
+
+    Diagnostics& diag_;
 };
 
 #endif // DZ_PARSER_HPP

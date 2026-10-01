@@ -6,7 +6,7 @@
 #include <cstring>
 #include <algorithm>
 
-std::optional<SecurePartition> SecurePartition::parse(std::ifstream& file) {
+std::optional<SecurePartition> SecurePartition::parse(std::ifstream& file, Diagnostics& diag) {
     try {
         file.seekg(SP_OFFSET);
         std::vector<char> data(SP_SIZE);
@@ -43,7 +43,12 @@ std::optional<SecurePartition> SecurePartition::parse(std::ifstream& file) {
             part.hash.assign(rec.hash, rec.hash + 32);
 
             if (part.reserved != 0) {
-                 throw std::runtime_error("unexpected reserved field value " + std::to_string(part.reserved) + " @ " + std::to_string(i) + " (" + part.name + ")");
+                // A non-zero reserved field is a consistency finding: the value
+                // is preserved as it is and written back on repack, so there is
+                // no reason to drop the whole secure partition over it.
+                diag.unexpected("Secure partition " + part.name,
+                                "reserved field is " + std::to_string(part.reserved) +
+                                " instead of 0 (entry " + std::to_string(i) + ")");
             }
 
             // Logic to populate the vector of pairs, preserving order.
@@ -71,7 +76,14 @@ std::optional<SecurePartition> SecurePartition::parse(std::ifstream& file) {
 
         return sec_part;
     } catch (const std::exception& e) {
-        // Log error if needed, but return nullopt to indicate parsing failure
+        // The secure partition block is optional, so a failure here is not
+        // necessarily fatal - but the reason has to be visible, otherwise the
+        // whole block (including its signature) silently disappears from
+        // metadata.json and from anything repacked from it.
+        if (diag.strict()) {
+            throw;
+        }
+        diag.warn("Secure partition", std::string("could not be parsed: ") + e.what());
         return std::nullopt;
     }
 }

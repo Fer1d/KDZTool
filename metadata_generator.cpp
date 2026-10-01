@@ -97,6 +97,19 @@ void generate_metadata(
     dz_json["is_factory_image"] = dz_hdr.is_factory_image;
     dz_json["operator_code"] = dz_hdr.operator_code;
     dz_json["sector_size"] = dz_hdr.sector_size();
+
+    // Everything the parser had to say about the file: checksum mismatches,
+    // unexpected field values, missing optional fields. Keeping them in the
+    // metadata makes a suspicious extraction traceable after the fact.
+    json diagnostics_json = json::array();
+    for (const auto& message : dz_hdr.diagnostics().messages()) {
+        diagnostics_json.push_back({
+            {"level", Diagnostics::level_name(message.level)},
+            {"where", message.where},
+            {"message", message.text}
+        });
+    }
+    dz_json["diagnostics"] = diagnostics_json;
     
     json dz_parts_json;
     // The data structure will be changed to vector<pair<...>> to preserve order

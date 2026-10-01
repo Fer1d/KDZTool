@@ -8,6 +8,7 @@
 #include <optional>
 #include <utility>
 #include "shared_structure.hpp"
+#include "diagnostics.hpp"
 
 class SecurePartition {
 public:
@@ -29,7 +30,7 @@ public:
     // The structure is: vector<pair<hw_id, vector<pair<partition_name, vector<Part_info>>>>>
     std::vector<std::pair<uint8_t, std::vector<std::pair<std::string, std::vector<Part>>>>> parts;
 
-    static std::optional<SecurePartition> parse(std::ifstream& file);
+    static std::optional<SecurePartition> parse(std::ifstream& file, Diagnostics& diag);
     void print_info() const;
 
 private:
